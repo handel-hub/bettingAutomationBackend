@@ -1,0 +1,4 @@
+{$KEYGEN_HOST} {
+    tls internal
+    reverse_proxy web:3000
+}

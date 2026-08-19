@@ -1,0 +1,105 @@
+services:
+  postgres:
+    image: ${IMAGE_POSTGRES}
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - keygen_internal
+
+  redis:
+    image: ${IMAGE_REDIS}
+    pull_policy: never
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - keygen_internal
+
+  setup:
+    profiles: [ "setup" ]
+    image: ${IMAGE_KEYGEN}
+    pull_policy: never
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+      DISABLE_DATABASE_ENVIRONMENT_CHECK: 1
+    env_file:
+      - .env
+    command: >
+      sh -c "
+        until pg_isready -h postgres -U ${POSTGRES_USER}; do
+          echo 'Waiting for PostgreSQL...'
+          sleep 1
+        done
+        bundle exec rails keygen:setup
+      "
+    depends_on:
+      - postgres
+    networks:
+      - keygen_internal
+
+  web:
+    image: ${IMAGE_KEYGEN}
+    pull_policy: never
+    restart: unless-stopped
+    command: "web"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - keygen_internal
+
+  worker:
+    image: ${IMAGE_KEYGEN}
+    pull_policy: never
+    restart: unless-stopped
+    command: "worker"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - keygen_internal
+
+  caddy:
+    image: ${IMAGE_CADDY}
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    env_file:
+      - .env
+    environment:
+      CADDY_HOSTS: "${KEYGEN_HOST}"
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile"]
+    depends_on:
+      - web
+    networks:
+      - keygen_internal
+
+networks:
+  keygen_internal:
+    name: keygen_internal
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,28 @@
+{
+  "kit_version": "{{KIT_VERSION}}",
+  "build_date": "{{BUILD_DATE}}",
+  "target_os": "Windows",
+  "target_architecture": "x86_64",
+  "docker_container_architecture": "amd64",
+  "images": {
+    "keygen": {
+      "digest": "{{KEYGEN_IMAGE}}",
+      "purpose": "Web API and Worker process"
+    },
+    "postgres": {
+      "digest": "{{POSTGRES_IMAGE}}",
+      "purpose": "Authoritative relational database"
+    },
+    "redis": {
+      "digest": "{{REDIS_IMAGE}}",
+      "purpose": "Ephemeral queue and cache"
+    },
+    "caddy": {
+      "digest": "{{CADDY_IMAGE}}",
+      "purpose": "TLS termination and reverse proxy"
+    }
+  },
+  "artifacts": {
+    "archive_sha256": "{{ARCHIVE_SHA256}}"
+  }
+}
