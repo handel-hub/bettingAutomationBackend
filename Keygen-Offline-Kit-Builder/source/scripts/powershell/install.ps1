@@ -64,9 +64,9 @@ function Install-WslKernel {
 
 function Install-Docker {
     Write-Host "Installing Docker Desktop..."
-    $dockerPath = (Get-Command "docker" -ErrorAction SilentlyContinue).Source
-    if ($dockerPath) {
-        Write-Host "Docker is already installed at $dockerPath. Skipping." -ForegroundColor Yellow
+    $dockerCmd = Get-Command "docker" -ErrorAction SilentlyContinue
+    if ($dockerCmd) {
+        Write-Host "Docker is already installed at $($dockerCmd.Source). Skipping." -ForegroundColor Yellow
         return
     }
     Start-Process "installers\Docker-Desktop-Installer.exe" -Wait -ArgumentList 'install --quiet --accept-license'

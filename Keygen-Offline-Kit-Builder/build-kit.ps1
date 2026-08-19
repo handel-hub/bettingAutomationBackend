@@ -37,9 +37,9 @@ function Verify-DockerReady {
 Write-Host "Checking if Docker is running..."
 if (-not (Verify-DockerReady)) {
     Write-Host "Docker daemon is not responding. Checking if Docker Desktop is installed..." -ForegroundColor Yellow
-    $dockerPath = (Get-Command "docker" -ErrorAction SilentlyContinue).Source
+    $dockerCmd = Get-Command "docker" -ErrorAction SilentlyContinue
     
-    if (-not $dockerPath -and -not (Test-Path "C:\Program Files\Docker\Docker\Docker Desktop.exe")) {
+    if (-not $dockerCmd -and -not (Test-Path "C:\Program Files\Docker\Docker\Docker Desktop.exe")) {
         Write-Host "Docker Desktop is not installed. Downloading and installing automatically..." -ForegroundColor Yellow
         $tempInstaller = "$env:TEMP\Docker-Desktop-Installer-Temp.exe"
         Invoke-WebRequest -Uri $Installers["DockerDesktop"] -OutFile $tempInstaller
