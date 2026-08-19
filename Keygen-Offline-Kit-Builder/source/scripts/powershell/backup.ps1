@@ -15,14 +15,15 @@ New-Item -ItemType Directory -Path "$BackupDir\tls" -Force | Out-Null
 
 Write-Host "Creating Backup $BackupDate..."
 
-# 1. Stop app layer (drain workers/web)
+# 1. Stop app layer (drain workers/web to prevent partial transactions)
 Write-Host "Stopping Web and Worker..."
 docker compose --env-file "$EnvDir\.env" -f "config\docker-compose.yml" stop web worker
+if ($LASTEXITCODE -ne 0) { throw "Failed to stop web and worker containers cleanly." }
 
-# 2. Dump Postgres
+# 2. Dump Postgres (Custom physical backup format)
 Write-Host "Exporting PostgreSQL..."
-# Using pg_dump -Fc for custom physical backup.
 docker exec postgres pg_dump -Fc -U keygen -d keygen -f /tmp/backup.dump
+if ($LASTEXITCODE -ne 0) { throw "PostgreSQL database dump failed! Aborting backup." }
 docker cp postgres:/tmp/backup.dump "$BackupDir\database.dump"
 docker exec postgres rm /tmp/backup.dump
 

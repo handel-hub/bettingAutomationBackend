@@ -95,6 +95,7 @@ function Import-Images {
     
     Write-Host "Hashes match. Loading images..."
     docker load -i "images\keygen-images.tar.gz"
+    if ($LASTEXITCODE -ne 0) { throw "Failed to load Docker images into the daemon." }
 }
 
 function Generate-Config {
@@ -156,6 +157,7 @@ function Init-Database {
     
     # Start dependencies
     docker compose --env-file "$EnvDir\.env" -f "config\docker-compose.yml" up -d postgres redis
+    if ($LASTEXITCODE -ne 0) { throw "Failed to start database dependencies." }
     Start-Sleep -Seconds 5
     
     # Wait for Postgres
@@ -166,6 +168,7 @@ function Init-Database {
 function Start-Services {
     Write-Host "Starting all services..."
     docker compose --env-file "$EnvDir\.env" -f "config\docker-compose.yml" up -d web worker caddy
+    if ($LASTEXITCODE -ne 0) { throw "Failed to start application services." }
 }
 
 function Extract-TLS {

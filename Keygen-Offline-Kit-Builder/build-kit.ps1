@@ -82,6 +82,7 @@ foreach ($key in $Images.Keys) {
     $imageTag = $Images[$key]
     Write-Host "Pulling $imageTag (linux/amd64)..." -ForegroundColor Yellow
     docker pull $imageTag --platform linux/amd64 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to pull image $imageTag. Check your internet connection." }
     
     $inspect = docker image inspect $imageTag | ConvertFrom-Json
     $digest = $inspect[0].RepoDigests | Where-Object { $_ -match "@sha256:" } | Select-Object -First 1
@@ -99,6 +100,7 @@ foreach ($key in $Images.Keys) {
 Write-Host "Exporting images to archive..." -ForegroundColor Yellow
 $imageRefs = $Images.Values -join " "
 Invoke-Expression "docker save $imageRefs | gzip > $OutputName/images/keygen-images.tar.gz"
+if ($LASTEXITCODE -ne 0) { throw "Failed to export images to archive. Ensure you have enough disk space." }
 
 # 6. Hash the Image Archive
 Write-Host "Hashing archive..."

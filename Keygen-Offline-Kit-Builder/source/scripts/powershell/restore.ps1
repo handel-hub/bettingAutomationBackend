@@ -38,9 +38,12 @@ docker compose --env-file "$EnvDir\.env" -f "config\docker-compose.yml" stop web
 Write-Host "Dropping and recreating database..."
 docker exec postgres dropdb -U keygen keygen
 docker exec postgres createdb -U keygen keygen
+if ($LASTEXITCODE -ne 0) { throw "Failed to recreate the Keygen database structure in Postgres." }
+
 Write-Host "Restoring PostgreSQL dump..."
 docker cp "$BackupDir\database.dump" postgres:/tmp/backup.dump
 docker exec postgres pg_restore -U keygen -d keygen /tmp/backup.dump
+if ($LASTEXITCODE -ne 0) { throw "pg_restore encountered errors. The database might be in an inconsistent state!" }
 docker exec postgres rm /tmp/backup.dump
 
 # 3. Restore Config
