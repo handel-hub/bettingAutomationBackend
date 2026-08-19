@@ -11,20 +11,24 @@ $ErrorActionPreference = "Stop"
 if (-not (Test-Path "installers")) { New-Item -ItemType Directory -Path "installers" | Out-Null }
 
 function Download-FileWithRetry {
-    param([string]$Url, [string]$OutFile)
+    param(
+        [Parameter(Mandatory=$true)][string]$Url, 
+        [Parameter(Mandatory=$true)][string]$OutFile,
+        [int]$MinSizeMB = 10
+    )
     
     $fileName = Split-Path $OutFile -Leaf
     $localPath = "installers\$fileName"
     
-    # Check if a fully downloaded file exists in cache (>50MB for these installers)
+    # Check if a fully downloaded file exists in cache
     if (Test-Path $localPath) {
-        $fileSize = (Get-Item $localPath).Length
-        if ($fileSize -gt 50MB) {
+        $fileSizeMB = (Get-Item $localPath).Length / 1MB
+        if ($fileSizeMB -gt $MinSizeMB) {
             Write-Host "Found $fileName in local 'installers' folder. Skipping download!" -ForegroundColor Green
             Copy-Item $localPath -Destination $OutFile -Force
             return
         } else {
-            Write-Host "Found incomplete/corrupted $fileName in cache. Redownloading..." -ForegroundColor Yellow
+            Write-Host "Found incomplete/corrupted $fileName in cache (Size: $([math]::Round($fileSizeMB, 2)) MB). Redownloading..." -ForegroundColor Yellow
             Remove-Item $localPath -Force
         }
     }
@@ -52,6 +56,8 @@ function Download-FileWithRetry {
     }
 }
 
+Set-Location $PSScriptRoot
+
 $KitVersion = "1.0.0"
 $OutputName = "Keygen-Offline-Kit-v$KitVersion"
 
@@ -71,9 +77,10 @@ Write-Host "Starting Online Kit Builder for v$KitVersion" -ForegroundColor Cyan
 
 # 1. Verify Docker is available locally to pull/export images
 function Verify-DockerReady {
-    for ($i = 1; $i -le 30; $i++) {
+    if (-not (Get-Command "docker" -ErrorAction SilentlyContinue)) { return $false }
+    for ($i = 1; $i -le 10; $i++) {
         try {
-            $info = docker info 2>&1
+            docker info 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) { return $true }
         } catch {}
         Start-Sleep -Seconds 2
@@ -91,7 +98,11 @@ if (-not (Verify-DockerReady)) {
 Write-Host "Docker is ready!" -ForegroundColor Green
 
 # 2. Prepare Directory
-if (Test-Path $OutputName) { Remove-Item -Recurse -Force $OutputName }
+if (Test-Path $OutputName) { 
+    Write-Host "Cleaning up previous build..."
+    try { Remove-Item -Recurse -Force $OutputName } 
+    catch { throw "Failed to delete existing $OutputName folder. Ensure no files are open in this directory." }
+}
 New-Item -ItemType Directory -Path $OutputName | Out-Null
 New-Item -ItemType Directory -Path "$OutputName/installers" | Out-Null
 New-Item -ItemType Directory -Path "$OutputName/images" | Out-Null
@@ -126,7 +137,7 @@ foreach ($key in $Images.Keys) {
 # 5. Export Images
 Write-Host "Exporting images to archive..." -ForegroundColor Yellow
 $imageRefs = $Images.Values -join " "
-$exportCmd = "docker save -o $OutputName/images/keygen-images.tar $imageRefs ; tar.exe -czf $OutputName/images/keygen-images.tar.gz $OutputName/images/keygen-images.tar ; Remove-Item $OutputName/images/keygen-images.tar"
+$exportCmd = "docker save -o `"$OutputName/images/keygen-images.tar`" $imageRefs ; tar.exe -czf `"$OutputName/images/keygen-images.tar.gz`" `"$OutputName/images/keygen-images.tar`" ; Remove-Item `"$OutputName/images/keygen-images.tar`""
 $proc = Start-Process powershell -ArgumentList "-NoProfile -Command `"$exportCmd`"" -WindowStyle Hidden -PassThru
 $sec = 0
 while (-not $proc.HasExited) {
@@ -166,9 +177,10 @@ Set-Content -Path "$OutputName/manifest.json" -Value $manifestJson
 
 # 8. Checksum the Kit Core
 Write-Host "Generating kit checksums..."
+$basePath = (Resolve-Path $OutputName).Path
 Get-ChildItem -Path "$OutputName/scripts", "$OutputName/config" -Recurse -File | ForEach-Object {
     $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-    $relativePath = $_.FullName.Replace((Resolve-Path $OutputName).Path + "\", "").Replace("\", "/")
+    $relativePath = $_.FullName.Substring($basePath.Length + 1).Replace("\", "/")
     "$hash  $relativePath" | Out-File -Append -Encoding ascii "$OutputName/checksums.sha256"
 }
 
