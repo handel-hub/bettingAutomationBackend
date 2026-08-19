@@ -105,9 +105,16 @@ function Import-Images {
     
     if ($expectedHash -ne $actualHash) { throw "Corrupt image archive! Expected $expectedHash, got $actualHash" }
     
-    Write-Host "Hashes match. Loading images into Docker (This may take 1-2 minutes)..." -ForegroundColor Yellow
-    docker load -i "images\keygen-images.tar.gz"
-    if ($LASTEXITCODE -ne 0) { throw "Failed to load Docker images into the daemon." }
+    Write-Host "Hashes match. Loading images into Docker..." -ForegroundColor Yellow
+    $proc = Start-Process docker -ArgumentList "load -i `"images\keygen-images.tar.gz`"" -WindowStyle Hidden -PassThru
+    $sec = 0
+    while (-not $proc.HasExited) {
+        $sec++
+        Write-Progress -Activity "Offline Installation" -Status "Loading 1GB+ Docker Images... ($sec seconds elapsed)"
+        Start-Sleep -Seconds 1
+    }
+    Write-Progress -Activity "Offline Installation" -Completed
+    if ($proc.ExitCode -ne 0) { throw "Failed to load Docker images into the daemon." }
 }
 
 function Generate-Config {

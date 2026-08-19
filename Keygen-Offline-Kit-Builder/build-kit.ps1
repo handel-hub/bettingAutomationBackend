@@ -103,14 +103,30 @@ foreach ($key in $Images.Keys) {
 }
 
 # 5. Export Images
-Write-Host "Exporting images to archive (This may take 1-2 minutes)..." -ForegroundColor Yellow
-$imageRefs = $Images.Values -join " "
-Invoke-Expression "docker save $imageRefs | gzip > $OutputName/images/keygen-images.tar.gz"
-if ($LASTEXITCODE -ne 0) { throw "Failed to export images to archive. Ensure you have enough disk space." }
+Write-Host "Exporting images to archive..." -ForegroundColor Yellow
+$exportCmd = "docker save $imageRefs | gzip > $OutputName/images/keygen-images.tar.gz"
+$proc = Start-Process powershell -ArgumentList "-NoProfile -Command `"$exportCmd`"" -WindowStyle Hidden -PassThru
+$sec = 0
+while (-not $proc.HasExited) {
+    $sec++
+    Write-Progress -Activity "Packaging Kit" -Status "Compressing Docker Images... ($sec seconds elapsed)"
+    Start-Sleep -Seconds 1
+}
+Write-Progress -Activity "Packaging Kit" -Completed
+if ($proc.ExitCode -ne 0) { throw "Failed to export images to archive. Ensure you have enough disk space." }
 
 # 6. Hash the Image Archive
-Write-Host "Hashing archive (This may take a few seconds)..." -ForegroundColor Yellow
-$archiveHash = (Get-FileHash "$OutputName/images/keygen-images.tar.gz" -Algorithm SHA256).Hash
+Write-Host "Hashing archive..." -ForegroundColor Yellow
+$hashJob = Start-Job -ScriptBlock { (Get-FileHash $args[0] -Algorithm SHA256).Hash } -ArgumentList "$OutputName/images/keygen-images.tar.gz"
+$sec = 0
+while ($hashJob.State -eq 'Running') {
+    $sec++
+    Write-Progress -Activity "Packaging Kit" -Status "Calculating Checksums... ($sec seconds elapsed)"
+    Start-Sleep -Seconds 1
+}
+Write-Progress -Activity "Packaging Kit" -Completed
+$archiveHash = Receive-Job $hashJob
+Remove-Job $hashJob
 
 # 7. Generate Manifest
 Write-Host "Generating manifest.json..."
