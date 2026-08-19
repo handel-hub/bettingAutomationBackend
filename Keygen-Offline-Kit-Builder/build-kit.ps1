@@ -16,18 +16,29 @@ function Download-FileWithRetry {
     $fileName = Split-Path $OutFile -Leaf
     $localPath = "installers\$fileName"
     
+    # Check if a fully downloaded file exists in cache (>50MB for these installers)
     if (Test-Path $localPath) {
-        Write-Host "Found $fileName in local 'installers' folder. Skipping download!" -ForegroundColor Green
-        Copy-Item $localPath -Destination $OutFile -Force
-        return
+        $fileSize = (Get-Item $localPath).Length
+        if ($fileSize -gt 50MB) {
+            Write-Host "Found $fileName in local 'installers' folder. Skipping download!" -ForegroundColor Green
+            Copy-Item $localPath -Destination $OutFile -Force
+            return
+        } else {
+            Write-Host "Found incomplete/corrupted $fileName in cache. Redownloading..." -ForegroundColor Yellow
+            Remove-Item $localPath -Force
+        }
     }
 
     $maxAttempts = 3
     for ($i = 1; $i -le $maxAttempts; $i++) {
         try {
-            Invoke-WebRequest -Uri $Url -OutFile $OutFile -ErrorAction Stop
-            # Save to local installers folder for next time
-            Copy-Item $OutFile -Destination $localPath -Force
+            $tempPath = "$localPath.tmp"
+            Write-Host "Downloading $fileName to cache..." -ForegroundColor Cyan
+            Invoke-WebRequest -Uri $Url -OutFile $tempPath -ErrorAction Stop
+            
+            # Atomic save: Rename only after successful download
+            Move-Item -Path $tempPath -Destination $localPath -Force
+            Copy-Item $localPath -Destination $OutFile -Force
             return
         } catch {
             Write-Host "Download failed ($i/$maxAttempts): $_" -ForegroundColor Red
