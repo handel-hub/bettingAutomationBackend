@@ -8,12 +8,26 @@ $ErrorActionPreference = "Stop"
 # Enforce modern TLS for web requests (fixes connection resets on some machines)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+if (-not (Test-Path "cache")) { New-Item -ItemType Directory -Path "cache" | Out-Null }
+
 function Download-FileWithRetry {
     param([string]$Url, [string]$OutFile)
+    
+    $fileName = Split-Path $OutFile -Leaf
+    $cacheFile = "cache\$fileName"
+    
+    if (Test-Path $cacheFile) {
+        Write-Host "Found $fileName in local cache. Skipping download!" -ForegroundColor Green
+        Copy-Item $cacheFile -Destination $OutFile -Force
+        return
+    }
+
     $maxAttempts = 3
     for ($i = 1; $i -le $maxAttempts; $i++) {
         try {
             Invoke-WebRequest -Uri $Url -OutFile $OutFile -ErrorAction Stop
+            # Save to cache for next time
+            Copy-Item $OutFile -Destination $cacheFile -Force
             return
         } catch {
             Write-Host "Download failed ($i/$maxAttempts): $_" -ForegroundColor Red
@@ -21,7 +35,7 @@ function Download-FileWithRetry {
                 Write-Host "Retrying in 5 seconds..." -ForegroundColor Yellow
                 Start-Sleep -Seconds 5
             } else {
-                throw "Failed to download $Url. Please check your internet connection, VPN, or firewall. If 'desktop.docker.com' is blocked, you must manually download Docker Desktop to your machine."
+                throw "Failed to download $Url. If 'desktop.docker.com' is blocked, manually download $fileName and place it in the 'cache' folder next to this script."
             }
         }
     }
@@ -63,7 +77,7 @@ if (-not (Verify-DockerReady)) {
     
     if (-not $dockerCmd -and -not (Test-Path "C:\Program Files\Docker\Docker\Docker Desktop.exe")) {
         Write-Host "Docker Desktop is not installed. Downloading and installing automatically..." -ForegroundColor Yellow
-        $tempInstaller = "$env:TEMP\Docker-Desktop-Installer-Temp.exe"
+        $tempInstaller = "$env:TEMP\Docker-Desktop-Installer.exe"
         Download-FileWithRetry -Url $Installers["DockerDesktop"] -OutFile $tempInstaller
         
         Write-Host "Running Docker Desktop Installer... (Please approve any UAC prompts)" -ForegroundColor Yellow
