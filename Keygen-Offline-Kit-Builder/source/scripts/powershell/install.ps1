@@ -105,7 +105,7 @@ function Import-Images {
     
     if ($expectedHash -ne $actualHash) { throw "Corrupt image archive! Expected $expectedHash, got $actualHash" }
     
-    Write-Host "Hashes match. Loading images..."
+    Write-Host "Hashes match. Loading images into Docker (This may take 1-2 minutes)..." -ForegroundColor Yellow
     docker load -i "images\keygen-images.tar.gz"
     if ($LASTEXITCODE -ne 0) { throw "Failed to load Docker images into the daemon." }
 }
@@ -173,6 +173,7 @@ function Init-Database {
     Start-Sleep -Seconds 5
     
     # Wait for Postgres
+    Write-Host "Running Keygen Database Migrations and Setup (This may take up to a minute)..." -ForegroundColor Yellow
     docker compose --env-file "$EnvDir\.env" -f "config\docker-compose.yml" run --rm setup
     if ($LASTEXITCODE -ne 0) { throw "Keygen setup failed." }
 }

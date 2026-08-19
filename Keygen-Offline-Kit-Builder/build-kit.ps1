@@ -87,7 +87,7 @@ $Digests = @{}
 foreach ($key in $Images.Keys) {
     $imageTag = $Images[$key]
     Write-Host "Pulling $imageTag (linux/amd64)..." -ForegroundColor Yellow
-    docker pull $imageTag --platform linux/amd64 | Out-Null
+    docker pull $imageTag --platform linux/amd64
     if ($LASTEXITCODE -ne 0) { throw "Failed to pull image $imageTag. Check your internet connection." }
     
     $inspect = docker image inspect $imageTag | ConvertFrom-Json
@@ -103,13 +103,13 @@ foreach ($key in $Images.Keys) {
 }
 
 # 5. Export Images
-Write-Host "Exporting images to archive..." -ForegroundColor Yellow
+Write-Host "Exporting images to archive (This may take 1-2 minutes)..." -ForegroundColor Yellow
 $imageRefs = $Images.Values -join " "
 Invoke-Expression "docker save $imageRefs | gzip > $OutputName/images/keygen-images.tar.gz"
 if ($LASTEXITCODE -ne 0) { throw "Failed to export images to archive. Ensure you have enough disk space." }
 
 # 6. Hash the Image Archive
-Write-Host "Hashing archive..."
+Write-Host "Hashing archive (This may take a few seconds)..." -ForegroundColor Yellow
 $archiveHash = (Get-FileHash "$OutputName/images/keygen-images.tar.gz" -Algorithm SHA256).Hash
 
 # 7. Generate Manifest
