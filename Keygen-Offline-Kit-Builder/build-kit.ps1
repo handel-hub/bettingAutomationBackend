@@ -140,7 +140,8 @@ foreach ($key in $Images.Keys) {
 
 # 5. Export Images
 Write-Host "Exporting images to archive..." -ForegroundColor Yellow
-$exportCmd = "cmd.exe /c `"docker save $imageRefs | gzip > $OutputName/images/keygen-images.tar.gz`""
+$imageRefs = $Images.Values -join " "
+$exportCmd = "docker save -o $OutputName/images/keygen-images.tar $imageRefs ; tar.exe -czf $OutputName/images/keygen-images.tar.gz $OutputName/images/keygen-images.tar ; Remove-Item $OutputName/images/keygen-images.tar"
 $proc = Start-Process powershell -ArgumentList "-NoProfile -Command `"$exportCmd`"" -WindowStyle Hidden -PassThru
 $sec = 0
 while (-not $proc.HasExited) {
