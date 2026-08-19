@@ -8,17 +8,17 @@ $ErrorActionPreference = "Stop"
 # Enforce modern TLS for web requests (fixes connection resets on some machines)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-if (-not (Test-Path "cache")) { New-Item -ItemType Directory -Path "cache" | Out-Null }
+if (-not (Test-Path "installers")) { New-Item -ItemType Directory -Path "installers" | Out-Null }
 
 function Download-FileWithRetry {
     param([string]$Url, [string]$OutFile)
     
     $fileName = Split-Path $OutFile -Leaf
-    $cacheFile = "cache\$fileName"
+    $localPath = "installers\$fileName"
     
-    if (Test-Path $cacheFile) {
-        Write-Host "Found $fileName in local cache. Skipping download!" -ForegroundColor Green
-        Copy-Item $cacheFile -Destination $OutFile -Force
+    if (Test-Path $localPath) {
+        Write-Host "Found $fileName in local 'installers' folder. Skipping download!" -ForegroundColor Green
+        Copy-Item $localPath -Destination $OutFile -Force
         return
     }
 
@@ -26,8 +26,8 @@ function Download-FileWithRetry {
     for ($i = 1; $i -le $maxAttempts; $i++) {
         try {
             Invoke-WebRequest -Uri $Url -OutFile $OutFile -ErrorAction Stop
-            # Save to cache for next time
-            Copy-Item $OutFile -Destination $cacheFile -Force
+            # Save to local installers folder for next time
+            Copy-Item $OutFile -Destination $localPath -Force
             return
         } catch {
             Write-Host "Download failed ($i/$maxAttempts): $_" -ForegroundColor Red
@@ -35,7 +35,7 @@ function Download-FileWithRetry {
                 Write-Host "Retrying in 5 seconds..." -ForegroundColor Yellow
                 Start-Sleep -Seconds 5
             } else {
-                throw "Failed to download $Url. If 'desktop.docker.com' is blocked, manually download $fileName and place it in the 'cache' folder next to this script."
+                throw "Failed to download $Url. If 'desktop.docker.com' is blocked, manually download $fileName and place it in the 'installers' folder next to this script."
             }
         }
     }
