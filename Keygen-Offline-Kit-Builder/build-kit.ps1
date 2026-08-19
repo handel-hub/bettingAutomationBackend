@@ -83,36 +83,10 @@ function Verify-DockerReady {
 
 Write-Host "Checking if Docker is running..."
 if (-not (Verify-DockerReady)) {
-    Write-Host "Docker daemon is not responding. Checking if Docker Desktop is installed..." -ForegroundColor Yellow
-    $dockerCmd = Get-Command "docker" -ErrorAction SilentlyContinue
-    
-    if (-not $dockerCmd -and -not (Test-Path "C:\Program Files\Docker\Docker\Docker Desktop.exe")) {
-        Write-Host "Docker Desktop is not installed. Downloading and installing automatically..." -ForegroundColor Yellow
-        $tempInstaller = "$env:TEMP\Docker-Desktop-Installer.exe"
-        Download-FileWithRetry -Url $Installers["DockerDesktop"] -OutFile $tempInstaller
-        
-        Write-Host "Running Docker Desktop Installer... (Please approve any UAC prompts)" -ForegroundColor Yellow
-        Write-Host "Installing" -NoNewline
-        $proc = Start-Process $tempInstaller -ArgumentList 'install --quiet --accept-license' -PassThru
-        while (-not $proc.HasExited) {
-            Write-Host "." -NoNewline -ForegroundColor Cyan
-            Start-Sleep -Seconds 2
-        }
-        Write-Host " Done!" -ForegroundColor Green
-        
-        $env:Path += ";C:\Program Files\Docker\Docker\resources\bin"
-    }
-    
-    if (Test-Path "C:\Program Files\Docker\Docker\Docker Desktop.exe") {
-        Write-Host "Attempting to start Docker Desktop..." -ForegroundColor Yellow
-        Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
-    }
-    
-    Write-Host "Waiting for Docker to start up (this may take a minute)..."
-    if (-not (Verify-DockerReady)) {
-        Write-Error "Docker failed to start. If you just installed it, you may need to REBOOT your computer first to enable WSL features, then run this script again."
-        exit 1
-    }
+    Write-Error "Docker daemon is not responding or Docker Desktop is not installed on this machine."
+    Write-Host "`n[REQUIRED] The Online Kit Builder REQUIRES Docker Desktop to be installed and running so it can download and package the Keygen images." -ForegroundColor Yellow
+    Write-Host "Please download Docker Desktop from https://www.docker.com/products/docker-desktop/, install it, enable WSL2, restart your computer, and ensure Docker is running before executing this script again." -ForegroundColor Yellow
+    exit 1
 }
 Write-Host "Docker is ready!" -ForegroundColor Green
 
