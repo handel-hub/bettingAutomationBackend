@@ -171,11 +171,21 @@ function Start-Services {
 function Extract-TLS {
     Write-Host "Extracting Caddy Root CA..."
     if (-not (Test-Path "$EnvDir\tls")) { New-Item -ItemType Directory -Path "$EnvDir\tls" | Out-Null }
-    # Give Caddy a moment to generate certs
-    Start-Sleep -Seconds 10
-    docker cp caddy:/data/caddy/pki/authorities/local/root.crt "$EnvDir\tls\keygen-root-ca.crt"
-    Write-Host "Root CA extracted to $EnvDir\tls\keygen-root-ca.crt" -ForegroundColor Green
-    Write-Host "Import this CA into your Backend's trust store to connect securely." -ForegroundColor Yellow
+    
+    $maxAttempts = 30
+    for ($i = 1; $i -le $maxAttempts; $i++) {
+        try {
+            docker cp caddy:/data/caddy/pki/authorities/local/root.crt "$EnvDir\tls\keygen-root-ca.crt" 2>$null
+            if ($LASTEXITCODE -eq 0 -and (Test-Path "$EnvDir\tls\keygen-root-ca.crt")) {
+                Write-Host "Root CA extracted to $EnvDir\tls\keygen-root-ca.crt" -ForegroundColor Green
+                Write-Host "Import this CA into your Backend's trust store to connect securely." -ForegroundColor Yellow
+                return
+            }
+        } catch {}
+        Write-Host "Waiting for Caddy to generate TLS certificates..."
+        Start-Sleep -Seconds 2
+    }
+    throw "Failed to extract TLS certificates from Caddy after 60 seconds. Check Caddy container logs."
 }
 
 function Validate {

@@ -32,9 +32,15 @@ services:
       - .env
     command: >
       sh -c "
+        retries=0
         until pg_isready -h postgres -U ${POSTGRES_USER}; do
           echo 'Waiting for PostgreSQL...'
-          sleep 1
+          sleep 2
+          retries=$$((retries+1))
+          if [ $$retries -ge 30 ]; then
+            echo 'Timeout waiting for Postgres'
+            exit 1
+          fi
         done
         bundle exec rails keygen:setup
       "
