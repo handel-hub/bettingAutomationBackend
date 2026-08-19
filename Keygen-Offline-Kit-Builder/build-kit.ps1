@@ -23,13 +23,45 @@ $Installers = @{
 Write-Host "Starting Online Kit Builder for v$KitVersion" -ForegroundColor Cyan
 
 # 1. Verify Docker is available locally to pull/export images
-try {
-    $dockerInfo = docker info 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "Docker daemon is not running." }
-} catch {
-    Write-Error "Docker is required to build the offline kit. Ensure Docker Desktop is running."
-    exit 1
+function Verify-DockerReady {
+    for ($i = 1; $i -le 30; $i++) {
+        try {
+            $info = docker info 2>&1
+            if ($LASTEXITCODE -eq 0) { return $true }
+        } catch {}
+        Start-Sleep -Seconds 2
+    }
+    return $false
 }
+
+Write-Host "Checking if Docker is running..."
+if (-not (Verify-DockerReady)) {
+    Write-Host "Docker daemon is not responding. Checking if Docker Desktop is installed..." -ForegroundColor Yellow
+    $dockerPath = (Get-Command "docker" -ErrorAction SilentlyContinue).Source
+    
+    if (-not $dockerPath -and -not (Test-Path "C:\Program Files\Docker\Docker\Docker Desktop.exe")) {
+        Write-Host "Docker Desktop is not installed. Downloading and installing automatically..." -ForegroundColor Yellow
+        $tempInstaller = "$env:TEMP\Docker-Desktop-Installer-Temp.exe"
+        Invoke-WebRequest -Uri $Installers["DockerDesktop"] -OutFile $tempInstaller
+        
+        Write-Host "Running Docker Desktop Installer... (Please approve any UAC prompts)" -ForegroundColor Yellow
+        Start-Process $tempInstaller -Wait -ArgumentList 'install --quiet --accept-license'
+        
+        $env:Path += ";C:\Program Files\Docker\Docker\resources\bin"
+    }
+    
+    if (Test-Path "C:\Program Files\Docker\Docker\Docker Desktop.exe") {
+        Write-Host "Attempting to start Docker Desktop..." -ForegroundColor Yellow
+        Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    }
+    
+    Write-Host "Waiting for Docker to start up (this may take a minute)..."
+    if (-not (Verify-DockerReady)) {
+        Write-Error "Docker failed to start. If you just installed it, you may need to REBOOT your computer first to enable WSL features, then run this script again."
+        exit 1
+    }
+}
+Write-Host "Docker is ready!" -ForegroundColor Green
 
 # 2. Prepare Directory
 if (Test-Path $OutputName) { Remove-Item -Recurse -Force $OutputName }
