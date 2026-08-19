@@ -180,9 +180,20 @@ function Init-Database {
     Start-Sleep -Seconds 5
     
     # Wait for Postgres
-    Write-Host "Running Keygen Database Migrations and Setup (This may take up to a minute)..." -ForegroundColor Yellow
-    docker compose --env-file "$EnvDir\.env" -f "config\docker-compose.yml" run --rm setup
-    if ($LASTEXITCODE -ne 0) { throw "Keygen setup failed." }
+    Write-Host "Running Keygen Database Migrations and Setup..." -ForegroundColor Yellow
+    $logFile = "$env:TEMP\keygen-setup.log"
+    $proc = Start-Process docker -ArgumentList "compose --env-file `"$EnvDir\.env`" -f `"config\docker-compose.yml`" run --rm setup" -WindowStyle Hidden -RedirectStandardOutput $logFile -RedirectStandardError $logFile -PassThru
+    $sec = 0
+    while (-not $proc.HasExited) {
+        $sec++
+        Write-Progress -Activity "Database Configuration" -Status "Running Rails Migrations... ($sec seconds elapsed)"
+        Start-Sleep -Seconds 1
+    }
+    Write-Progress -Activity "Database Configuration" -Completed
+    if ($proc.ExitCode -ne 0) { 
+        $errLogs = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+        throw "Keygen setup failed! Logs:`n$errLogs" 
+    }
 }
 
 function Start-Services {

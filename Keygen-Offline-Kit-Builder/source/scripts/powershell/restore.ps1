@@ -42,8 +42,15 @@ if ($LASTEXITCODE -ne 0) { throw "Failed to recreate the Keygen database structu
 
 Write-Host "Restoring PostgreSQL dump..."
 docker cp "$BackupDir\database.dump" postgres:/tmp/backup.dump
-docker exec postgres pg_restore -U keygen -d keygen /tmp/backup.dump
-if ($LASTEXITCODE -ne 0) { throw "pg_restore encountered errors. The database might be in an inconsistent state!" }
+$proc = Start-Process docker -ArgumentList "exec postgres pg_restore -U keygen -d keygen /tmp/backup.dump" -WindowStyle Hidden -PassThru
+$sec = 0
+while (-not $proc.HasExited) {
+    $sec++
+    Write-Progress -Activity "Keygen Restore" -Status "Restoring PostgreSQL Database... ($sec seconds elapsed)"
+    Start-Sleep -Seconds 1
+}
+Write-Progress -Activity "Keygen Restore" -Completed
+if ($proc.ExitCode -ne 0) { throw "pg_restore encountered errors. The database might be in an inconsistent state!" }
 docker exec postgres rm /tmp/backup.dump
 
 # 3. Restore Config

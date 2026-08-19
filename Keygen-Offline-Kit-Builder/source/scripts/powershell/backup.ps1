@@ -22,8 +22,15 @@ if ($LASTEXITCODE -ne 0) { throw "Failed to stop web and worker containers clean
 
 # 2. Dump Postgres (Custom physical backup format)
 Write-Host "Exporting PostgreSQL..."
-docker exec postgres pg_dump -Fc -U keygen -d keygen -f /tmp/backup.dump
-if ($LASTEXITCODE -ne 0) { throw "PostgreSQL database dump failed! Aborting backup." }
+$proc = Start-Process docker -ArgumentList "exec postgres pg_dump -Fc -U keygen -d keygen -f /tmp/backup.dump" -WindowStyle Hidden -PassThru
+$sec = 0
+while (-not $proc.HasExited) {
+    $sec++
+    Write-Progress -Activity "Keygen Backup" -Status "Dumping PostgreSQL Database... ($sec seconds elapsed)"
+    Start-Sleep -Seconds 1
+}
+Write-Progress -Activity "Keygen Backup" -Completed
+if ($proc.ExitCode -ne 0) { throw "PostgreSQL database dump failed! Aborting backup." }
 docker cp postgres:/tmp/backup.dump "$BackupDir\database.dump"
 docker exec postgres rm /tmp/backup.dump
 
