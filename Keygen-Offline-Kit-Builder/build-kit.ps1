@@ -5,6 +5,28 @@ Builds the Keygen Offline Deployment Kit. Must be run on an internet-connected m
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Enforce modern TLS for web requests (fixes connection resets on some machines)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+function Download-FileWithRetry {
+    param([string]$Url, [string]$OutFile)
+    $maxAttempts = 3
+    for ($i = 1; $i -le $maxAttempts; $i++) {
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $OutFile -ErrorAction Stop
+            return
+        } catch {
+            Write-Host "Download failed ($i/$maxAttempts): $_" -ForegroundColor Red
+            if ($i -lt $maxAttempts) {
+                Write-Host "Retrying in 5 seconds..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 5
+            } else {
+                throw "Failed to download $Url. Please check your internet connection, VPN, or firewall. If 'desktop.docker.com' is blocked, you must manually download Docker Desktop to your machine."
+            }
+        }
+    }
+}
+
 $KitVersion = "1.0.0"
 $OutputName = "Keygen-Offline-Kit-v$KitVersion"
 
@@ -42,7 +64,7 @@ if (-not (Verify-DockerReady)) {
     if (-not $dockerCmd -and -not (Test-Path "C:\Program Files\Docker\Docker\Docker Desktop.exe")) {
         Write-Host "Docker Desktop is not installed. Downloading and installing automatically..." -ForegroundColor Yellow
         $tempInstaller = "$env:TEMP\Docker-Desktop-Installer-Temp.exe"
-        Invoke-WebRequest -Uri $Installers["DockerDesktop"] -OutFile $tempInstaller
+        Download-FileWithRetry -Url $Installers["DockerDesktop"] -OutFile $tempInstaller
         
         Write-Host "Running Docker Desktop Installer... (Please approve any UAC prompts)" -ForegroundColor Yellow
         Write-Host "Installing" -NoNewline
@@ -78,9 +100,9 @@ Copy-Item -Recurse -Path "source/*" -Destination $OutputName
 
 # 3. Download Installers
 Write-Host "Downloading Docker Desktop Installer..."
-Invoke-WebRequest -Uri $Installers["DockerDesktop"] -OutFile "$OutputName/installers/Docker-Desktop-Installer.exe"
+Download-FileWithRetry -Url $Installers["DockerDesktop"] -OutFile "$OutputName/installers/Docker-Desktop-Installer.exe"
 Write-Host "Downloading WSL2 Kernel Update..."
-Invoke-WebRequest -Uri $Installers["WslUpdate"] -OutFile "$OutputName/installers/wsl_update_x64.msi"
+Download-FileWithRetry -Url $Installers["WslUpdate"] -OutFile "$OutputName/installers/wsl_update_x64.msi"
 
 # 4. Pull Images & Resolve Digests
 $Digests = @{}
