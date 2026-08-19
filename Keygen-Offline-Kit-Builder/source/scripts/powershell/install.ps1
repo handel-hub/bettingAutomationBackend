@@ -59,7 +59,13 @@ function Install-WindowsFeatures {
 
 function Install-WslKernel {
     Write-Host "Installing WSL2 Kernel..."
-    Start-Process msiexec.exe -Wait -ArgumentList '/i "installers\wsl_update_x64.msi" /quiet /norestart'
+    Write-Host "Installing" -NoNewline
+    $proc = Start-Process msiexec.exe -ArgumentList '/i "installers\wsl_update_x64.msi" /quiet /norestart' -PassThru
+    while (-not $proc.HasExited) {
+        Write-Host "." -NoNewline -ForegroundColor Cyan
+        Start-Sleep -Seconds 2
+    }
+    Write-Host " Done!" -ForegroundColor Green
 }
 
 function Install-Docker {
@@ -69,7 +75,13 @@ function Install-Docker {
         Write-Host "Docker is already installed at $($dockerCmd.Source). Skipping." -ForegroundColor Yellow
         return
     }
-    Start-Process "installers\Docker-Desktop-Installer.exe" -Wait -ArgumentList 'install --quiet --accept-license'
+    Write-Host "Installing" -NoNewline
+    $proc = Start-Process "installers\Docker-Desktop-Installer.exe" -ArgumentList 'install --quiet --accept-license' -PassThru
+    while (-not $proc.HasExited) {
+        Write-Host "." -NoNewline -ForegroundColor Cyan
+        Start-Sleep -Seconds 2
+    }
+    Write-Host " Done!" -ForegroundColor Green
 }
 
 function Verify-DockerReady {

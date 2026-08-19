@@ -45,7 +45,13 @@ if (-not (Verify-DockerReady)) {
         Invoke-WebRequest -Uri $Installers["DockerDesktop"] -OutFile $tempInstaller
         
         Write-Host "Running Docker Desktop Installer... (Please approve any UAC prompts)" -ForegroundColor Yellow
-        Start-Process $tempInstaller -Wait -ArgumentList 'install --quiet --accept-license'
+        Write-Host "Installing" -NoNewline
+        $proc = Start-Process $tempInstaller -ArgumentList 'install --quiet --accept-license' -PassThru
+        while (-not $proc.HasExited) {
+            Write-Host "." -NoNewline -ForegroundColor Cyan
+            Start-Sleep -Seconds 2
+        }
+        Write-Host " Done!" -ForegroundColor Green
         
         $env:Path += ";C:\Program Files\Docker\Docker\resources\bin"
     }
