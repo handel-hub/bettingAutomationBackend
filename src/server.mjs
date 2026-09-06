@@ -29,6 +29,7 @@ app.use('/authorization', authorizationRouter);
 app.use('/reconciliation', reconciliationRouter);
 app.use('/transfers', transferRouter);
 app.use('/payments', paymentRouter);
+app.use('/api/payments', paymentRouter);
 app.use('/admin', adminRouter);
 app.get('/health/live', (req, res) => res.json({ status: 'ok' }));
 app.get('/health/ready', (req, res) => res.json({ status: 'ready' }));

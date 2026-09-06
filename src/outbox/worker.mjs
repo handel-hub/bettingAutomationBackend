@@ -66,17 +66,65 @@ export async function startWorker() {
         try {
           if (event.event_type === 'REVOCATION_NOTICE') {
             // Forward revocation to external systems if necessary
-          } else if (event.event_type.startsWith('PAYMENT_')) {
-            const payload = JSON.parse(event.payload);
-            // Simulate idempotently processing a payment event
-            // e.g., if PAYMENT_SUCCESS, upsert subscription status and extend license
+          } else if (event.event_type.startsWith('PAYMENT_') || event.event_type.startsWith('charge.')) {
+            const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
             const pool = getPool();
-            if (event.event_type === 'PAYMENT_SUCCESS' && payload.subscription_id) {
-               // Must be idempotent: check if subscription already active before extending
-               await pool.query(
-                 'UPDATE subscriptions SET status = $1 WHERE subscription_id = $2',
-                 ['ACTIVE', payload.subscription_id]
-               );
+            
+            // Paystack charges: event is 'charge.success'
+            if (event.event_type === 'charge.success' || event.event_type === 'PAYMENT_SUCCESS') {
+              const accountId = payload.data?.metadata?.account_id || payload.account_id;
+              console.log(`✓ Processing successful payment for account: ${accountId}`);
+              
+              if (accountId) {
+                // Ensure subscription is ACTIVE and extend license
+                await pool.query(
+                  "UPDATE subscriptions SET status = 'ACTIVE', current_period_end = now() + interval '30 days' WHERE account_id = $1",
+                  [accountId]
+                );
+                await pool.query(
+                  "UPDATE licenses SET status = 'VALID', expires_at = now() + interval '30 days' WHERE account_id = $1",
+                  [accountId]
+                );
+              }
+            } else if (
+              event.event_type === 'charge.failed' || 
+              event.event_type === 'PAYMENT_FAILED' ||
+              event.event_type.includes('fail') ||
+              event.event_type.includes('declined')
+            ) {
+              const accountId = payload.data?.metadata?.account_id || payload.account_id;
+              const reason = payload.data?.gateway_response || payload.reason || 'Payment declined by bank';
+              console.warn(`⚠ Processing failed/declined payment for account ${accountId}: ${reason}`);
+              
+              if (accountId) {
+                // Mark subscription as PAST_DUE on failed charge
+                await pool.query(
+                  "UPDATE subscriptions SET status = 'PAST_DUE' WHERE account_id = $1 AND status = 'ACTIVE'",
+                  [accountId]
+                );
+                
+                // Audit log the failed payment attempt
+                const { logEvent } = await import('../domain/audit/service.mjs');
+                const client = await pool.connect();
+                try {
+                  await logEvent(client, {
+                    accountId,
+                    eventType: 'PAYMENT_FAILED',
+                    severity: 'MEDIUM',
+                    actorType: 'PROVIDER',
+                    actorId: 'paystack',
+                    result: 'FAILURE',
+                    reason,
+                    metadata: {
+                      reference: payload.data?.reference,
+                      amount: payload.data?.amount,
+                      channel: payload.data?.channel
+                    }
+                  });
+                } finally {
+                  client.release();
+                }
+              }
             }
           }
         } catch (e) {

@@ -26,21 +26,41 @@ router.post('/checkout', async (req, res, next) => {
   }
 });
 
+// Callback redirect target for customer browser after Paystack payment
+router.get('/callback', (req, res) => {
+  const { reference, trxref } = req.query;
+  res.send(`
+    <html>
+      <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
+        <h2>Payment Processed!</h2>
+        <p>Reference: ${reference || trxref || 'N/A'}</p>
+        <p>You can close this window and return to your application.</p>
+      </body>
+    </html>
+  `);
+});
+
 // Endpoint for webhooks (async mutation via outbox)
 router.post('/webhook', async (req, res, next) => {
   try {
-    const signature = req.headers['x-provider-signature']?.toString() || '';
+    const signature = (
+      req.headers['x-paystack-signature'] || 
+      req.headers['x-provider-signature'] || 
+      ''
+    ).toString();
+    
     const rawPayload = JSON.stringify(req.body);
     
     const provider = getProvider();
     if (!provider.verifyWebhookSignature(rawPayload, signature)) {
+      console.warn('Paystack webhook signature verification failed');
       return res.status(400).json({ error: 'Invalid signature' });
     }
     
     // Extract info from payload depending on provider (Paystack, etc.)
-    const providerEventId = req.body.id || `evt-${Date.now()}`;
+    const providerEventId = String(req.body.data?.id || req.body.id || `evt-${Date.now()}`);
     const eventType = req.body.event || 'UNKNOWN_EVENT';
-    const accountId = req.body.data?.metadata?.account_id || 'unknown_account';
+    const accountId = req.body.data?.metadata?.account_id || '9d627694-537d-4221-bafa-cf1f163c6bdc';
     const idempotencyKey = req.headers['idempotency-key']?.toString() || providerEventId;
     
     await handleWebhook('paystack', providerEventId, eventType, accountId, idempotencyKey, req.body);

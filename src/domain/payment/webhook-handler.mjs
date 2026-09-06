@@ -22,11 +22,15 @@ export async function handleWebhook(provider, providerEventId, eventType, accoun
       return; // Already processed
     }
     
+    // Determine initial payment status
+    const isFailed = eventType.includes('fail') || eventType.includes('declined');
+    const paymentStatus = isFailed ? 'FAILED' : 'RECEIVED';
+
     // Insert into payment_events
     await client.query(`
-      INSERT INTO payment_events (provider_event_id, provider, event_type, account_id, idempotency_key)
-      VALUES ($1, $2, $3, $4, $5)
-    `, [providerEventId, provider, eventType, accountId, idempotencyKey]);
+      INSERT INTO payment_events (provider_event_id, provider, event_type, account_id, idempotency_key, status)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [providerEventId, provider, eventType, accountId, idempotencyKey, paymentStatus]);
     
     // Enqueue outbox event
     await client.query(`
