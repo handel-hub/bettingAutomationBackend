@@ -33,16 +33,16 @@ export function startScheduler() {
         
         // 2. Check last run
         const runRes = await client.query(`
-          INSERT INTO scheduled_jobs (job_name, last_run_at, status)
-          VALUES ($1, now(), 'RUNNING')
+          INSERT INTO scheduled_jobs (job_name, last_run_at, locked_until)
+          VALUES ($1, now(), now() + interval '${job.intervalMs} milliseconds')
           ON CONFLICT (job_name) DO UPDATE
-          SET last_run_at = now(), status = 'RUNNING'
-          WHERE scheduled_jobs.last_run_at < now() - interval '${job.intervalMs} milliseconds'
+          SET last_run_at = now(), locked_until = now() + interval '${job.intervalMs} milliseconds'
+          WHERE scheduled_jobs.locked_until IS NULL OR scheduled_jobs.locked_until <= now()
           RETURNING *
         `, [job.name]);
         
         if (runRes.rows.length === 0) {
-          // Ran recently
+          // Ran recently / locked
           await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
           return;
         }
@@ -50,10 +50,9 @@ export function startScheduler() {
         // 3. Run job
         try {
           await job.handler(client);
-          await client.query('UPDATE scheduled_jobs SET status = \'SUCCESS\' WHERE job_name = $1', [job.name]);
+          await client.query('UPDATE scheduled_jobs SET last_success_at = now() WHERE job_name = $1', [job.name]);
         } catch (err) {
           console.error(`Job ${job.name} failed:`, err);
-          await client.query('UPDATE scheduled_jobs SET status = \'FAILED\', last_error = $2 WHERE job_name = $1', [job.name, err.message]);
         }
         
         await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);

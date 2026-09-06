@@ -16,7 +16,7 @@ export function sign(privateKey, message) {
 
 /**
  * Verify an Ed25519 signature with domain separation.
- * @param {crypto.KeyObject} publicKey
+ * @param {crypto.KeyObject | Buffer} publicKey
  * @param {Buffer} message
  * @param {string} sigHex
  * @returns {boolean}
@@ -24,5 +24,14 @@ export function sign(privateKey, message) {
 export function verify(publicKey, message, sigHex) {
   const domainSeparatedMessage = Buffer.concat([DOMAIN_PREFIX, message]);
   const signature = Buffer.from(sigHex, 'hex');
-  return crypto.verify(null, domainSeparatedMessage, publicKey, signature);
+  
+  let keyObj = publicKey;
+  if (Buffer.isBuffer(publicKey)) {
+    // If raw 32-byte public key, wrap in Ed25519 SPKI DER prefix (12 bytes)
+    const spkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
+    const der = Buffer.concat([spkiPrefix, publicKey]);
+    keyObj = crypto.createPublicKey({ key: der, format: 'der', type: 'spki' });
+  }
+  
+  return crypto.verify(null, domainSeparatedMessage, keyObj, signature);
 }

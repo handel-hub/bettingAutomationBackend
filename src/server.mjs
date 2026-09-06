@@ -41,7 +41,7 @@ import { initializeJobs } from './jobs/index.mjs';
 const config = loadConfig();
 const port = config.PORT || 3000;
 
-initializePaymentAdapter(config.PAYMENT_WEBHOOK_SECRET);
+initializePaymentAdapter(config.PAYSTACK_SECRET_KEY || config.PAYMENT_WEBHOOK_SECRET);
 
 app.listen(port, () => {
   console.log(`Backend server listening on port ${port}`);

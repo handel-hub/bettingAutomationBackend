@@ -18,12 +18,22 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
   }
   
   return withTransaction('READ COMMITTED', async (client) => {
-    // 1. Get account from session
+    // 1. Get account from session (or verify stateless PARTIAL token)
     const sessionRes = await client.query('SELECT account_id FROM sessions WHERE session_id = $1 AND status IN (\'AUTHENTICATED\', \'PARTIAL\')', [authenticatedSessionId]);
-    if (sessionRes.rows.length === 0) {
-      throw new Error('Invalid or expired session');
+    let accountId;
+    if (sessionRes.rows.length > 0) {
+      accountId = sessionRes.rows[0].account_id;
+    } else {
+      // Check if authenticatedSessionId is in security_events metadata as partial_token
+      const auditRes = await client.query(
+        "SELECT account_id FROM security_events WHERE metadata->>'partial_token' = $1 AND event_type = 'LOGIN_SUCCESS' AND created_at > now() - interval '2 hours' LIMIT 1",
+        [authenticatedSessionId]
+      );
+      if (auditRes.rows.length === 0) {
+        throw new Error('Invalid or expired session');
+      }
+      accountId = auditRes.rows[0].account_id;
     }
-    const accountId = sessionRes.rows[0].account_id;
     
     // 2. Check for duplicate installationId / publicKeyHex
     const existingRes = await client.query('SELECT machine_id FROM machines WHERE installation_id = $1 AND public_key_hex = $2', [installationId, publicKeyHex]);

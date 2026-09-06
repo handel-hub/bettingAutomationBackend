@@ -1,6 +1,6 @@
 // @ts-check
-import { withTransaction } from '../../persistence/transaction.mjs';
-import { createUpload, writeChunk, deleteUpload } from '../../adapters/storage/adapter.mjs';
+import { withTransaction } from '../persistence/transaction.mjs';
+import { createUpload, writeChunk, deleteUpload } from '../adapters/storage/adapter.mjs';
 
 /**
  * Merge a range [start, end] into a sorted array of disjoint ranges.

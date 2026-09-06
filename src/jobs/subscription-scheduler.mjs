@@ -11,7 +11,6 @@ export async function scheduleSubscriptions(client) {
     UPDATE subscriptions 
     SET status = 'EXPIRED' 
     WHERE status = 'ACTIVE' 
-      AND cancel_at_period_end = true 
       AND current_period_end < now()
     RETURNING subscription_id, account_id
   `);

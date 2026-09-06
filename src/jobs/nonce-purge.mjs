@@ -9,7 +9,7 @@ export async function purgeNonces(client) {
   // We'll give it a generous 2 minute window before deleting.
   const res = await client.query(`
     DELETE FROM server_nonces 
-    WHERE created_at < now() - interval '2 minutes'
+    WHERE received_at < now() - interval '2 minutes'
   `);
   console.log(`Purged ${res.rowCount} nonces`);
 }

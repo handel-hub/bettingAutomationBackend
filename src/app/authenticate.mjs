@@ -122,12 +122,13 @@ export async function authenticate(email, password, machineId, protocolVersion, 
     // 7. Audit log for login success
     await logEvent(client, {
       accountId: account.account_id,
-      machineId,
-      sessionId,
+      machineId: machineId || undefined,
+      sessionId: isPartial ? undefined : sessionId,
       eventType: 'LOGIN_SUCCESS',
       severity: 'LOW',
       actorType: 'USER',
-      result: 'SUCCESS'
+      result: 'SUCCESS',
+      metadata: isPartial ? { partial_token: sessionId } : {}
     });
     
     // GraceToken generation would go here (Phase 9)

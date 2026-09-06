@@ -38,9 +38,18 @@ export async function logEvent(client, params) {
         actor_type, actor_id, result, reason, metadata, prev_hash, event_hash
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
     `, [
-      params.accountId, params.machineId, params.sessionId, params.eventType, params.severity,
-      params.actorType, params.actorId, params.result, params.reason, JSON.stringify(metadata),
-      prevHash, newHash
+      params.accountId || null, 
+      params.machineId || null, 
+      params.sessionId || null, 
+      params.eventType, 
+      params.severity,
+      params.actorType, 
+      params.actorId || null, 
+      params.result, 
+      params.reason || null, 
+      JSON.stringify(metadata),
+      prevHash, 
+      newHash
     ]);
     
     await client.query('UPDATE accounts SET last_event_hash = $2 WHERE account_id = $1', [params.accountId, newHash]);
