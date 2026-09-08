@@ -50,18 +50,18 @@ export async function authenticate(email, password, machineId, protocolVersion, 
     
     // 2. Lock machine if provided
     if (machineId) {
-      const machineRes = await client.query('SELECT * FROM machines WHERE machine_id = $1 AND account_id = $2 FOR UPDATE', [machineId, account.account_id]);
-      const machine = machineRes.rows[0];
+      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(machineId);
+      let machine = null;
+      if (isUUID) {
+        const machineRes = await client.query('SELECT * FROM machines WHERE machine_id = $1 AND account_id = $2 FOR UPDATE', [machineId, account.account_id]);
+        machine = machineRes.rows[0];
+      }
       
       if (!machine || machine.status === 'REVOKED') {
-        // Unregistered machine -> PARTIAL auth
+        // Unregistered machine -> PARTIAL auth (stateless token to prevent FK violation on sessions table)
         isPartial = true;
-        const insertSessionRes = await client.query(`
-          INSERT INTO sessions (account_id, machine_id, status, renew_after, expires_at)
-          VALUES ($1, $2, 'PARTIAL', now() + interval '1 hour', now() + interval '2 hours')
-          RETURNING session_id, session_generation
-        `, [account.account_id, machineId]);
-        sessionId = insertSessionRes.rows[0].session_id;
+        const { randomUUID } = await import('crypto');
+        sessionId = randomUUID();
       } else {
         // 3. Retire existing session
         const updateOldSessRes = await client.query(`
@@ -122,17 +122,24 @@ export async function authenticate(email, password, machineId, protocolVersion, 
     // 7. Audit log for login success
     await logEvent(client, {
       accountId: account.account_id,
-      machineId: machineId || undefined,
+      machineId: isPartial ? undefined : (machineId || undefined),
       sessionId: isPartial ? undefined : sessionId,
       eventType: 'LOGIN_SUCCESS',
       severity: 'LOW',
       actorType: 'USER',
       result: 'SUCCESS',
-      metadata: isPartial ? { partial_token: sessionId } : {}
+      metadata: isPartial ? { partial_token: sessionId, presented_machine_id: machineId } : {}
     });
     
-    // GraceToken generation would go here (Phase 9)
-    const graceToken = null;
+    // Issue signed GraceToken if authenticated (Phase 9 / CRIT-04)
+    let graceToken = null;
+    if (!isPartial && machineId) {
+      const { issueGraceToken } = await import('../domain/licensing/grace-token.mjs');
+      const license = await getActiveLicenseForAuth(client, account.account_id, machineId);
+      const capabilities = computeCapabilities(license);
+      const riskTier = license?.limits?.risk_tier || 'LOW_RISK';
+      graceToken = await issueGraceToken(account.account_id, machineId, capabilities, riskTier);
+    }
     
     return {
       sessionId,

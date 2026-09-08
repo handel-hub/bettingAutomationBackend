@@ -1,5 +1,6 @@
 // @ts-check
 import { getActiveKey, signWithActiveKey } from '../../crypto/keys.mjs';
+import { canonicalStringify } from '../../protocol/canonical.mjs';
 
 const TIER_TTL_HOURS = {
   HIGH_RISK: 4,
@@ -27,7 +28,7 @@ export async function issueGraceToken(accountId, machineId, capabilities, riskTi
     // max_offline_budget_ms removed per Freeze Audit P1-5
   };
   
-  const canonicalString = JSON.stringify(tokenPayload, Object.keys(tokenPayload).sort());
+  const canonicalString = canonicalStringify(tokenPayload);
   const messageBuffer = Buffer.from(canonicalString, 'utf8');
   
   const { signatureHex, keyVersion } = await signWithActiveKey(messageBuffer);

@@ -60,7 +60,21 @@ router.post('/webhook', async (req, res, next) => {
     // Extract info from payload depending on provider (Paystack, etc.)
     const providerEventId = String(req.body.data?.id || req.body.id || `evt-${Date.now()}`);
     const eventType = req.body.event || 'UNKNOWN_EVENT';
-    const accountId = req.body.data?.metadata?.account_id || '9d627694-537d-4221-bafa-cf1f163c6bdc';
+    let accountId = req.body.data?.metadata?.account_id || req.body.account_id;
+    
+    if (!accountId && req.body.data?.customer?.email) {
+      const pool = getPool();
+      const accRes = await pool.query('SELECT account_id FROM accounts WHERE email = $1', [req.body.data.customer.email]);
+      if (accRes.rows.length > 0) {
+        accountId = accRes.rows[0].account_id;
+      }
+    }
+    
+    if (!accountId) {
+      console.warn('Webhook received with no resolvable accountId');
+      return res.status(400).json({ error: 'Unresolvable account_id in payment webhook' });
+    }
+    
     const idempotencyKey = req.headers['idempotency-key']?.toString() || providerEventId;
     
     await handleWebhook('paystack', providerEventId, eventType, accountId, idempotencyKey, req.body);

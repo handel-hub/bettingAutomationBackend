@@ -3,6 +3,7 @@ import { sha256 } from '../crypto/hashing.mjs';
 import { verify, sign } from '../crypto/ed25519.mjs';
 import { getActiveKey, getKeyByVersion } from '../crypto/keys.mjs';
 import { getKmsAdapter } from '../crypto/kms-adapter.mjs';
+import { canonicalStringify } from './canonical.mjs';
 
 /**
  * Validates a protocol envelope.
@@ -38,7 +39,7 @@ export async function validateEnvelope(raw, machinePublicKeyHex) {
     }
   }
 
-  // To verify signature, we need to construct the canonical representation of the envelope without the signature
+  // To verify signature, we construct canonical representation of envelope without signature
   const envelopeToSign = {
     version: raw.version,
     sessionId,
@@ -50,10 +51,7 @@ export async function validateEnvelope(raw, machinePublicKeyHex) {
     payload
   };
   
-  // Canonical JSON serialization is tricky in JS, usually a stable stringify is used
-  // Or we just sign the payload base64 + nonce + timestamp etc.
-  // We'll assume a stable JSON.stringify for now
-  const canonicalString = JSON.stringify(envelopeToSign, Object.keys(envelopeToSign).sort());
+  const canonicalString = canonicalStringify(envelopeToSign);
   const messageBuffer = Buffer.from(canonicalString, 'utf8');
   
   const publicKey = Buffer.from(machinePublicKeyHex, 'hex');
@@ -70,9 +68,10 @@ export async function validateEnvelope(raw, machinePublicKeyHex) {
  * Build an envelope to send to the client.
  * @param {any} payload 
  * @param {any} generation 
+ * @param {number} [serverEpoch=1]
  * @returns {Promise<any>}
  */
-export async function buildEnvelope(payload, generation) {
+export async function buildEnvelope(payload, generation, serverEpoch = 1) {
   const activeKeyInfo = await getActiveKey();
   const kms = getKmsAdapter();
   const privateKey = await kms.getPrivateKey(activeKeyInfo.key_id);
@@ -80,11 +79,12 @@ export async function buildEnvelope(payload, generation) {
   const envelope = {
     version: 2,
     timestamp: new Date().toISOString(),
+    server_epoch: serverEpoch,
     payload,
     generation
   };
   
-  const canonicalString = JSON.stringify(envelope, Object.keys(envelope).sort());
+  const canonicalString = canonicalStringify(envelope);
   const messageBuffer = Buffer.from(canonicalString, 'utf8');
   const signatureHex = sign(privateKey, messageBuffer);
   

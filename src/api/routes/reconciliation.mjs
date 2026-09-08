@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import { reconcile } from '../../domain/reconciliation/service.mjs';
 import { envelopeValidator } from '../middleware/envelope-validator.mjs';
+import { buildEnvelope } from '../../protocol/envelope.mjs';
 
 const router = Router();
 
@@ -13,10 +14,17 @@ router.post('/sync', async (req, res, next) => {
     
     const result = await reconcile(
       envelope.machineId,
-      envelope.clientGeneration
+      envelope.clientGeneration,
+      envelope.clientServerEpoch,
+      envelope.payload
     );
     
-    res.json(result);
+    const signedResponse = await buildEnvelope(
+      result, 
+      result.serverState?.session || envelope.clientGeneration || 1, 
+      result.serverEpoch || 1
+    );
+    res.json(signedResponse);
   } catch (err) {
     next(err);
   }

@@ -1,12 +1,25 @@
 // @ts-check
-import test from 'node:test';
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { sign } from '../src/crypto/ed25519.mjs';
+import { httpServer } from '../src/server.mjs';
+import { closePool } from '../src/persistence/connection.mjs';
+
+const PORT = process.env.PORT || 3001;
+const BASE_URL = `http://localhost:${PORT}`;
+
+before(async () => {
+  if (!httpServer.listening) {
+    await new Promise((resolve) => {
+      httpServer.listen(PORT, () => resolve(null));
+    });
+  }
+});
 
 test('End-to-End Integration Flow: Auth -> Machine Registration -> Full Auth -> Paystack Checkout', async (t) => {
   // 1. Initial Login (Unregistered Machine -> PARTIAL Session)
-  const loginRes = await fetch('http://localhost:3000/auth/init', {
+  const loginRes = await fetch(`${BASE_URL}/api/v1/auth/init`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -28,7 +41,7 @@ test('End-to-End Integration Flow: Auth -> Machine Registration -> Full Auth -> 
   const selfSig = sign(clientKeyPair.privateKey, Buffer.from(installationId, 'utf8'));
 
   // 3. Register Machine under the PARTIAL Session
-  const regRes = await fetch('http://localhost:3000/machines/register', {
+  const regRes = await fetch(`${BASE_URL}/api/v1/machines/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -45,7 +58,7 @@ test('End-to-End Integration Flow: Auth -> Machine Registration -> Full Auth -> 
   const machineId = regData.machineId;
 
   // 4. Authenticate again with the registered machineId -> Full AUTHENTICATED Session
-  const fullAuthRes = await fetch('http://localhost:3000/auth/init', {
+  const fullAuthRes = await fetch(`${BASE_URL}/api/v1/auth/init`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -60,16 +73,24 @@ test('End-to-End Integration Flow: Auth -> Machine Registration -> Full Auth -> 
   assert.ok(fullAuthEnvelope.signatures['1'], 'Response must be signed with Backend Key version 1');
 
   // 5. Payment Checkout Flow with Paystack
-  const checkoutRes = await fetch('http://localhost:3000/payments/checkout', {
+  const checkoutRes = await fetch(`${BASE_URL}/api/v1/payments/checkout`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       accountId: '9d627694-537d-4221-bafa-cf1f163c6bdc',
-      planId: 'starter_monthly',
-      returnUrl: 'http://localhost:3000/callback'
+      planId: 'PRO',
+      returnUrl: `http://localhost:${PORT}/callback`
     })
   });
   assert.strictEqual(checkoutRes.status, 200, 'Paystack checkout should return 200');
   const checkoutData = await checkoutRes.json();
   assert.ok(checkoutData.checkoutUrl.startsWith('https://checkout.paystack.com/'), 'Must return a valid Paystack checkout URL');
 });
+
+after(async () => {
+  if (httpServer.listening) {
+    await new Promise((resolve) => httpServer.close(resolve));
+  }
+  await closePool();
+});
+

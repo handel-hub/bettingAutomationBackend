@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import { renew, logout } from '../../domain/session/service.mjs';
 import { envelopeValidator } from '../middleware/envelope-validator.mjs';
+import { buildEnvelope } from '../../protocol/envelope.mjs';
 
 const router = Router();
 
@@ -19,10 +20,13 @@ router.post('/renew', async (req, res, next) => {
       envelope.nonce
     );
     
-    res.json({
+    const payload = {
       ...result,
       responseValidated: true // P-04 Guard field
-    });
+    };
+    
+    const signedResponse = await buildEnvelope(payload, result.sessionGeneration || envelope.clientGeneration || 1);
+    res.json(signedResponse);
   } catch (err) {
     next(err);
   }
@@ -32,7 +36,8 @@ router.post('/logout', async (req, res, next) => {
   try {
     const { envelope } = req;
     await logout(envelope.sessionId, envelope.machineId);
-    res.json({ success: true });
+    const signedResponse = await buildEnvelope({ success: true, loggedOut: true }, 1);
+    res.json(signedResponse);
   } catch (err) {
     next(err);
   }

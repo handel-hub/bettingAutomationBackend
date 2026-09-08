@@ -38,7 +38,7 @@
   },
   "type": "module",
   "scripts": {
-    "test": "node --test tests/**/*.test.mjs",
+    "test": "node --test --test-concurrency=1 tests/**/*.test.mjs",
     "migrate": "node migrations/runner.mjs",
     "start": "node src/server.mjs"
   }

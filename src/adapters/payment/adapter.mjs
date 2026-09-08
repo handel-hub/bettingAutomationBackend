@@ -14,14 +14,28 @@ export function initializePaymentAdapter(secretKey) {
 
     setProvider({
       async createCheckoutSession(accountId, planId, returnUrl) {
-        // Find customer email from accountId (stubbed email for now)
-        const email = `${accountId}@local.com`; 
+        let email = `${accountId}@bettingautomation.io`; 
+        let amount = 1000000; // ₦10,000 in Kobo default
         
-        // Convert planId to amount or use Paystack plans
-        // In Paystack, we initiate a transaction
+        try {
+          const { getPool } = await import('../../persistence/connection.mjs');
+          const pool = getPool();
+          const accRes = await pool.query('SELECT email FROM accounts WHERE account_id = $1', [accountId]);
+          if (accRes.rows.length > 0 && accRes.rows[0].email) {
+            email = accRes.rows[0].email;
+          }
+          
+          const planRes = await pool.query('SELECT limits FROM plan_entitlements WHERE plan_id = $1', [planId]);
+          if (planRes.rows.length > 0 && planRes.rows[0].limits?.price) {
+            amount = Math.round(Number(planRes.rows[0].limits.price) * 100);
+          }
+        } catch {
+          // Fallback
+        }
+        
         const response = await paystack.transaction.initialize({
           email,
-          amount: 5000, // Dummy amount in kobo, should be derived from planId
+          amount,
           callback_url: returnUrl,
           metadata: {
             account_id: accountId,

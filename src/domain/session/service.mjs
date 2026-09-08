@@ -32,9 +32,19 @@ export async function renew(sessionId, machineId, presentedGenerationState, clie
       throw err;
     }
     
-    // 3. Generation check
-    if (presentedGenerationState.session !== state.session_generation || 
-        presentedGenerationState.machine !== state.machine_generation) {
+    // 3. Generation check - support both numeric generation and object state
+    let clientSessionGen = state.session_generation;
+    let clientMachineGen = state.machine_generation;
+    
+    if (typeof presentedGenerationState === 'number') {
+      clientSessionGen = presentedGenerationState;
+    } else if (presentedGenerationState && typeof presentedGenerationState === 'object') {
+      clientSessionGen = presentedGenerationState.session ?? state.session_generation;
+      clientMachineGen = presentedGenerationState.machine ?? state.machine_generation;
+    }
+    
+    if (Number(clientSessionGen) !== Number(state.session_generation) || 
+        Number(clientMachineGen) !== Number(state.machine_generation)) {
       const err = new Error('GENERATION_MISMATCH');
       err.status = 403;
       throw err;
@@ -54,9 +64,19 @@ export async function renew(sessionId, machineId, presentedGenerationState, clie
       result: 'SUCCESS'
     });
     
+    // 6. Issue GraceToken on session renewal (CRIT-04)
+    const { issueGraceToken } = await import('../licensing/grace-token.mjs');
+    const { getActiveLicenseForAuth } = await import('../licensing/service.mjs');
+    const { computeCapabilities } = await import('../authorization/service.mjs');
+    const license = await getActiveLicenseForAuth(client, session.account_id, machineId);
+    const capabilities = computeCapabilities(license);
+    const riskTier = license?.limits?.risk_tier || 'LOW_RISK';
+    const graceToken = await issueGraceToken(session.account_id, machineId, capabilities, riskTier);
+    
     return {
       status: 'AUTHENTICATED',
-      // grace token issuance should happen here (Phase 9)
+      sessionGeneration: state.session_generation,
+      graceToken
     };
   });
 }

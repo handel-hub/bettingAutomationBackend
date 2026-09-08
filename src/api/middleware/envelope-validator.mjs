@@ -35,10 +35,29 @@ export async function envelopeValidator(req, res, next) {
       throw new Error(`Envelope validation failed: ${error}`);
     }
     
+    // Look up accountId from session
+    if (envelope.sessionId) {
+      const sessRes = await pool.query(
+        "SELECT account_id FROM sessions WHERE session_id = $1 AND machine_id = $2 AND status = 'AUTHENTICATED'",
+        [envelope.sessionId, machineId]
+      );
+      if (sessRes.rows.length > 0) {
+        req.accountId = sessRes.rows[0].account_id;
+      }
+    }
+    
     // Check nonce replay
     await useNonce(envelope.nonce, envelope.clientServerEpoch);
     
     req.envelope = envelope;
+    req.machineId = machineId;
+    req.sessionId = envelope.sessionId;
+    
+    // Unwrap payload if object so downstream route handlers can read req.body transparently
+    if (envelope.payload && typeof envelope.payload === 'object' && !Array.isArray(envelope.payload)) {
+      req.body = { ...envelope.payload };
+    }
+    
     next();
   } catch (err) {
     next(err);

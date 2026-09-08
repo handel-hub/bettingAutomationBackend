@@ -55,7 +55,25 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
       throw new Error('Invalid self-signature');
     }
     
-    // 5. Insert machine
+    // 5. Seat limit check against active license / plan limits
+    const licenseRes = await client.query(
+      "SELECT limits FROM licenses WHERE account_id = $1 AND status = 'VALID' ORDER BY issued_at DESC LIMIT 1",
+      [accountId]
+    );
+    const maxMachines = licenseRes.rows[0]?.limits?.max_machines || 5;
+    
+    const countRes = await client.query(
+      "SELECT COUNT(*) FROM machines WHERE account_id = $1 AND status != 'REVOKED'",
+      [accountId]
+    );
+    const activeMachineCount = Number(countRes.rows[0]?.count || 0);
+    if (activeMachineCount >= maxMachines) {
+      const err = new Error(`SEAT_LIMIT_EXCEEDED: Maximum ${maxMachines} active machines allowed`);
+      err.status = 403;
+      throw err;
+    }
+    
+    // 6. Insert machine
     const insertRes = await client.query(`
       INSERT INTO machines (installation_id, account_id, public_key_hex, descriptor, status, machine_generation)
       VALUES ($1, $2, $3, $4, 'REGISTERED', 1)
