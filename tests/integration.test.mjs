@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import { sign } from '../src/crypto/ed25519.mjs';
 import { httpServer } from '../src/server.mjs';
-import { closePool } from '../src/persistence/connection.mjs';
+import { getPool, closePool } from '../src/persistence/connection.mjs';
 
 const PORT = process.env.PORT || 3001;
 const BASE_URL = `http://localhost:${PORT}`;
@@ -15,6 +15,8 @@ before(async () => {
       httpServer.listen(PORT, () => resolve(null));
     });
   }
+  const pool = getPool();
+  await pool.query("DELETE FROM machines WHERE descriptor->>'hostname' = 'test-node-automated'");
 });
 
 test('End-to-End Integration Flow: Auth -> Machine Registration -> Full Auth -> Paystack Checkout', async (t) => {

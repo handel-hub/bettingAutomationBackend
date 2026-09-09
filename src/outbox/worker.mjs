@@ -57,13 +57,29 @@ export async function completeEvent(eventId, success) {
  * @returns {Promise<boolean>} success
  */
 export async function processOutboxEvent(event) {
-  let success = true;
-  try {
+  return withTransaction('READ COMMITTED', async (client) => {
     if (event.event_type === 'REVOCATION_NOTICE') {
-      // Forward revocation to external systems if necessary
+      const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
+      const { broadcast } = await import('../websocket/server.mjs');
+      const targetAccountId = payload.scope === 'ACCOUNT' ? payload.targetId : null;
+      broadcast('revocation:notice', {
+        scope: payload.scope,
+        targetId: payload.targetId,
+        reason: payload.reason,
+        timestamp: new Date().toISOString()
+      }, targetAccountId);
+      return true;
+    } else if (event.event_type === 'SUBSCRIPTION_EXPIRED') {
+      const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
+      const { broadcast } = await import('../websocket/server.mjs');
+      broadcast('subscription:expired', {
+        subscriptionId: payload.subscriptionId,
+        accountId: payload.accountId,
+        timestamp: new Date().toISOString()
+      }, payload.accountId);
+      return true;
     } else if (event.event_type.startsWith('PAYMENT_') || event.event_type.startsWith('charge.')) {
       const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
-      const pool = getPool();
       
       // Paystack charges: event is 'charge.success'
       if (event.event_type === 'charge.success' || event.event_type === 'PAYMENT_SUCCESS') {
@@ -78,7 +94,7 @@ export async function processOutboxEvent(event) {
           let capabilities = ['CAP_AUTOMATION_START', 'CAP_AUTOMATION_STOP', 'CAP_FILE_UPLOAD', 'CAP_TACTICAL_BET', 'CAP_CASH_OUT'];
           let limits = { max_machines: 5, max_concurrent_browsers: 5, risk_tier: 'LOW' };
           try {
-            const entRes = await pool.query('SELECT capabilities, limits FROM plan_entitlements WHERE plan_id = $1', [planId]);
+            const entRes = await client.query('SELECT capabilities, limits FROM plan_entitlements WHERE plan_id = $1', [planId]);
             if (entRes.rows.length > 0) {
               capabilities = entRes.rows[0].capabilities || capabilities;
               limits = entRes.rows[0].limits || limits;
@@ -88,31 +104,31 @@ export async function processOutboxEvent(event) {
           }
           
           // 1. Ensure subscription row exists and is ACTIVE
-          const subCheck = await pool.query('SELECT subscription_id FROM subscriptions WHERE account_id = $1', [accountId]);
+          const subCheck = await client.query('SELECT subscription_id FROM subscriptions WHERE account_id = $1', [accountId]);
           if (subCheck.rows.length > 0) {
-            await pool.query(
+            await client.query(
               "UPDATE subscriptions SET status = 'ACTIVE', plan_id = $1, current_period_end = now() + interval '30 days', updated_at = now() WHERE account_id = $2",
               [planId, accountId]
             );
           } else {
             const providerSubId = payload.data?.subscription_code || `sub-${ref}`;
-            await pool.query(`
+            await client.query(`
               INSERT INTO subscriptions (account_id, provider_subscription_id, plan_id, status, current_period_start, current_period_end)
               VALUES ($1, $2, $3, 'ACTIVE', now(), now() + interval '30 days')
             `, [accountId, providerSubId, planId]);
           }
           
           // 2. Ensure license row exists and is VALID
-          const licCheck = await pool.query('SELECT license_id FROM licenses WHERE account_id = $1', [accountId]);
+          const licCheck = await client.query('SELECT license_id FROM licenses WHERE account_id = $1', [accountId]);
           if (licCheck.rows.length > 0) {
-            await pool.query(`
+            await client.query(`
               UPDATE licenses 
               SET status = 'VALID', plan_id = $1, capabilities = $2, limits = $3, expires_at = now() + interval '30 days',
                   license_revision = license_revision + 1, updated_at = now()
               WHERE account_id = $4
             `, [planId, JSON.stringify(capabilities), JSON.stringify(limits), accountId]);
           } else {
-            await pool.query(`
+            await client.query(`
               INSERT INTO licenses (account_id, plan_id, status, capabilities, limits, issued_at, expires_at, license_revision)
               VALUES ($1, $2, 'VALID', $3, $4, now(), now() + interval '30 days', 1)
             `, [accountId, planId, JSON.stringify(capabilities), JSON.stringify(limits)]);
@@ -123,7 +139,7 @@ export async function processOutboxEvent(event) {
           const majorAmount = (typeof rawAmount === 'number' && rawAmount > 1000) ? (rawAmount / 100) : rawAmount;
           const invId = `inv-${ref}`;
           
-          await pool.query(`
+          await client.query(`
             INSERT INTO invoices (id, account_id, reference, amount, currency, status, paid_at, receipt_url)
             VALUES ($1, $2, $3, $4, 'NGN', 'Paid', now(), $5)
             ON CONFLICT (id) DO UPDATE SET
@@ -143,40 +159,32 @@ export async function processOutboxEvent(event) {
         
         if (accountId) {
           // Mark subscription as PAST_DUE on failed charge
-          await pool.query(
+          await client.query(
             "UPDATE subscriptions SET status = 'PAST_DUE' WHERE account_id = $1 AND status = 'ACTIVE'",
             [accountId]
           );
-          
+
           // Audit log the failed payment attempt
           const { logEvent } = await import('../domain/audit/service.mjs');
-          const client = await pool.connect();
-          try {
-            await logEvent(client, {
-              accountId,
-              eventType: 'PAYMENT_FAILED',
-              severity: 'MEDIUM',
-              actorType: 'PROVIDER',
-              actorId: 'paystack',
-              result: 'FAILURE',
-              reason,
-              metadata: {
-                reference: payload.data?.reference,
-                amount: payload.data?.amount,
-                channel: payload.data?.channel
-              }
-            });
-          } finally {
-            client.release();
-          }
+          await logEvent(client, {
+            accountId,
+            eventType: 'PAYMENT_FAILED',
+            severity: 'MEDIUM',
+            actorType: 'PROVIDER',
+            actorId: 'paystack',
+            result: 'FAILURE',
+            reason,
+            metadata: {
+              reference: payload.data?.reference,
+              amount: payload.data?.amount,
+              channel: payload.data?.channel
+            }
+          });
         }
       }
     }
-  } catch (e) {
-    console.error(`Error processing event ${event.event_id}:`, e);
-    success = false;
-  }
-  return success;
+    return true;
+  });
 }
 
 export async function startWorker() {

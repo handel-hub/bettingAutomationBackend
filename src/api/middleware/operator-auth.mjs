@@ -26,47 +26,45 @@ export async function operatorAuth(req, res, next) {
     }
 
     const authHeader = req.headers['authorization'];
-    const sessionHeader = req.headers['x-session-id'] || req.headers['x-account-id'];
+    const sessionHeader = req.headers['x-session-id'];
     const pool = getPool();
 
     let accountId = null;
+    let sessionId = null;
 
     if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.slice(7).trim();
-      // Look up session
-      const sessRes = await pool.query(
-        "SELECT account_id FROM sessions WHERE session_id = $1 AND status = 'AUTHENTICATED' AND expires_at > now()",
-        [token]
-      );
-      if (sessRes.rows.length > 0) {
-        accountId = sessRes.rows[0].account_id;
-      }
-    } else if (sessionHeader) {
-      // Could be directly an account_id or a session_id
-      const sessRes = await pool.query(
-        "SELECT account_id FROM sessions WHERE session_id = $1 AND status = 'AUTHENTICATED' AND expires_at > now()",
-        [sessionHeader]
-      );
-      if (sessRes.rows.length > 0) {
-        accountId = sessRes.rows[0].account_id;
-      } else {
-        const accRes = await pool.query('SELECT account_id FROM accounts WHERE account_id = $1', [sessionHeader]);
-        if (accRes.rows.length > 0) {
-          accountId = accRes.rows[0].account_id;
-        }
-      }
+      sessionId = authHeader.slice(7).trim();
+    } else if (typeof sessionHeader === 'string') {
+      sessionId = sessionHeader.trim();
     }
 
-    // Local dev / test environment fallback ONLY (never in strict production)
-    if (!accountId && (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development' || !process.env.NODE_ENV)) {
-      const defaultAccRes = await pool.query("SELECT account_id FROM accounts WHERE status = 'ACTIVE' ORDER BY created_at ASC LIMIT 1");
-      if (defaultAccRes.rows.length > 0) {
-        accountId = defaultAccRes.rows[0].account_id;
+    if (sessionId) {
+      const sessRes = await pool.query(`
+        SELECT s.account_id, s.status, s.expires_at, a.status as account_status
+        FROM sessions s
+        JOIN accounts a ON s.account_id = a.account_id
+        WHERE s.session_id = $1 AND s.status = 'AUTHENTICATED' AND s.expires_at > now()
+      `, [sessionId]);
+
+      if (sessRes.rows.length > 0) {
+        if (sessRes.rows[0].account_status === 'LOCKED') {
+          return res.status(423).json({
+            error: { code: 'ACCOUNT_LOCKED', message: 'Account is locked' }
+          });
+        }
+        accountId = sessRes.rows[0].account_id;
+        // @ts-ignore
+        req.sessionId = sessionId;
       }
     }
 
     if (!accountId) {
-      return res.status(401).json({ error: 'Operator authentication required' });
+      return res.status(401).json({
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Operator authentication required. Valid session Bearer token or signed envelope required.'
+        }
+      });
     }
 
     // @ts-ignore
@@ -76,3 +74,4 @@ export async function operatorAuth(req, res, next) {
     next(err);
   }
 }
+

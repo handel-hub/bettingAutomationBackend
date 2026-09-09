@@ -11,10 +11,12 @@ export async function initializeStorage() {
 
 /**
  * Initialize a new upload.
+ * @param {string} [customUploadId]
  * @returns {Promise<string>}
  */
-export async function createUpload() {
-  const uploadId = randomUUID();
+export async function createUpload(customUploadId) {
+  await initializeStorage();
+  const uploadId = customUploadId || randomUUID();
   const filePath = path.join(UPLOAD_DIR, uploadId);
   // Create empty file
   const fh = await fs.open(filePath, 'w');

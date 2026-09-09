@@ -29,8 +29,12 @@ import http from 'http';
 const app = express();
 
 app.use(helmet());
-app.use(cors());
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    // @ts-ignore
+    req.rawBody = buf;
+  }
+}));
 
 // Protocol & Authority Mounts (supporting both /api/v1/... and /...)
 app.use('/auth', authRouter);

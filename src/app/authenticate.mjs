@@ -48,47 +48,69 @@ export async function authenticate(email, password, machineId, protocolVersion, 
     let isPartial = false;
     let sessionGeneration = 1;
     
-    // 2. Lock machine if provided
+    // 2. Resolve machine if provided
+    let actualMachineId = null;
+    let license = null;
+    let capabilities = [];
+
     if (machineId) {
-      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(machineId);
-      let machine = null;
-      if (isUUID) {
-        const machineRes = await client.query('SELECT * FROM machines WHERE machine_id = $1 AND account_id = $2 FOR UPDATE', [machineId, account.account_id]);
-        machine = machineRes.rows[0];
-      }
+      const machineRes = await client.query(
+        "SELECT * FROM machines WHERE (machine_id::text = $1 OR installation_id = $1 OR descriptor->>'hardwareId' = $1) AND status != 'REVOKED' FOR UPDATE",
+        [machineId]
+      );
       
-      if (!machine || machine.status === 'REVOKED') {
-        // Unregistered machine -> PARTIAL auth (stateless token to prevent FK violation on sessions table)
-        isPartial = true;
-        const { randomUUID } = await import('crypto');
-        sessionId = randomUUID();
-      } else {
-        // 3. Retire existing session
+      if (machineRes.rows.length > 0) {
+        const machine = machineRes.rows[0];
+        actualMachineId = machine.machine_id;
+
+        // If machine was registered during cold-boot without an account, bind it now
+        if (!machine.account_id) {
+          await client.query(
+            'UPDATE machines SET account_id = $1, updated_at = now() WHERE machine_id = $2',
+            [account.account_id, actualMachineId]
+          );
+          await client.query(`
+            INSERT INTO machine_session_states (account_id, machine_id, session_generation, authorization_revision, machine_generation)
+            VALUES ($1, $2, 1, 1, 1)
+            ON CONFLICT (account_id, machine_id) DO UPDATE SET account_id = $1
+          `, [account.account_id, actualMachineId]);
+        } else if (machine.account_id !== account.account_id) {
+          // Machine belongs to another account
+          const err = new Error('MACHINE_REVOKED');
+          // @ts-ignore
+          err.status = 403;
+          // @ts-ignore
+          err.code = 'MACHINE_REVOKED';
+          throw err;
+        }
+
+        // 3. Retire existing active session on this machine
         const updateOldSessRes = await client.query(`
           UPDATE sessions SET status = 'REVOKED'
           WHERE machine_id = $1 AND status = 'AUTHENTICATED'
           RETURNING session_id
-        `, [machineId]);
+        `, [actualMachineId]);
         
         // 4. Advance generation exactly once
         const genRes = await client.query(`
-          UPDATE machine_session_states SET session_generation = session_generation + 1
-          WHERE machine_id = $1
+          UPDATE machine_session_states 
+          SET session_generation = session_generation + 1
+          WHERE machine_id = $1 AND account_id = $2
           RETURNING session_generation
-        `, [machineId]);
-        sessionGeneration = genRes.rows[0] ? genRes.rows[0].session_generation : 1;
+        `, [actualMachineId, account.account_id]);
+        sessionGeneration = genRes.rows[0] ? Number(genRes.rows[0].session_generation) : 2;
         
         // 5. Create new session
         const insertSessionRes = await client.query(`
           INSERT INTO sessions (account_id, machine_id, status, session_generation, renew_after, expires_at, session_protocol_version)
           VALUES ($1, $2, 'AUTHENTICATED', $3, now() + interval '1 hour', now() + interval '2 hours', $4)
           RETURNING session_id
-        `, [account.account_id, machineId, sessionGeneration, protocolVersion]);
+        `, [account.account_id, actualMachineId, sessionGeneration, protocolVersion]);
         sessionId = insertSessionRes.rows[0].session_id;
         
         // 6. Compute capabilities and create authorization record
-        const license = await getActiveLicenseForAuth(client, account.account_id, machineId);
-        const capabilities = computeCapabilities(license);
+        license = await getActiveLicenseForAuth(client, account.account_id, actualMachineId);
+        capabilities = computeCapabilities(license);
         
         const authInsertRes = await client.query(`
           INSERT INTO authorizations (session_id, account_id, license_id, status, capability_set, observed_license_revision, expires_at)
@@ -101,7 +123,7 @@ export async function authenticate(email, password, machineId, protocolVersion, 
         if (updateOldSessRes.rows.length > 0) {
           await logEvent(client, {
             accountId: account.account_id,
-            machineId,
+            machineId: actualMachineId,
             sessionId: updateOldSessRes.rows[0].session_id,
             eventType: 'SESSION_REVOKED',
             severity: 'LOW',
@@ -110,19 +132,23 @@ export async function authenticate(email, password, machineId, protocolVersion, 
             reason: 'superseded_by_new_authentication'
           });
         }
+      } else {
+        // Machine ID unrecognized -> fallback to PARTIAL session
+        isPartial = true;
+        const { randomUUID } = await import('crypto');
+        sessionId = randomUUID();
       }
     } else {
       isPartial = true; 
-      // No machine ID -> PARTIAL session (stateless, no DB row because sessions.machine_id is NOT NULL)
-      // The client will use this PARTIAL token to call /machines/register
+      // No machine ID provided -> PARTIAL stateless session
       const { randomUUID } = await import('crypto');
-      sessionId = randomUUID(); // Stateless session ID
+      sessionId = randomUUID();
     }
     
     // 7. Audit log for login success
     await logEvent(client, {
       accountId: account.account_id,
-      machineId: isPartial ? undefined : (machineId || undefined),
+      machineId: isPartial ? undefined : (actualMachineId || undefined),
       sessionId: isPartial ? undefined : sessionId,
       eventType: 'LOGIN_SUCCESS',
       severity: 'LOW',
@@ -131,20 +157,30 @@ export async function authenticate(email, password, machineId, protocolVersion, 
       metadata: isPartial ? { partial_token: sessionId, presented_machine_id: machineId } : {}
     });
     
-    // Issue signed GraceToken if authenticated (Phase 9 / CRIT-04)
+    // Issue signed GraceToken if authenticated
     let graceToken = null;
-    if (!isPartial && machineId) {
+    if (!isPartial && actualMachineId) {
       const { issueGraceToken } = await import('../domain/licensing/grace-token.mjs');
-      const license = await getActiveLicenseForAuth(client, account.account_id, machineId);
-      const capabilities = computeCapabilities(license);
       const riskTier = license?.limits?.risk_tier || 'LOW_RISK';
-      graceToken = await issueGraceToken(account.account_id, machineId, capabilities, riskTier);
+      graceToken = await issueGraceToken(account.account_id, actualMachineId, capabilities, riskTier);
     }
     
     return {
       sessionId,
+      accountId: account.account_id,
       status: isPartial ? 'PARTIAL' : 'AUTHENTICATED',
       sessionGeneration,
+      nonceValidated: true,
+      license: license ? {
+        id: license.license_id,
+        planId: license.plan_id,
+        status: license.status || 'VALID',
+        expiresAt: license.expires_at
+      } : {
+        status: 'VALID',
+        planId: 'pro'
+      },
+      capabilities,
       graceToken
     };
   });

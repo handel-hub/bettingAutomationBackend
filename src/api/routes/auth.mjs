@@ -7,7 +7,8 @@ const router = Router();
 
 router.post('/init', async (req, res, next) => {
   try {
-    const { email, password, machineId, protocolVersion, clientNonce } = req.body;
+    const payload = (req.body && req.body.payload && typeof req.body.payload === 'object') ? req.body.payload : req.body;
+    const { email, password, machineId, protocolVersion, clientNonce } = payload;
     
     if (!email || !password) {
       const err = new Error('Missing credentials');
@@ -15,20 +16,26 @@ router.post('/init', async (req, res, next) => {
       throw err;
     }
     
-    const authResult = await authenticate(email, password, machineId || null, protocolVersion || 2, clientNonce || 'dummy');
+    const authResult = await authenticate(
+      email,
+      password,
+      machineId || null,
+      protocolVersion || 2,
+      clientNonce || 'dummy'
+    );
     
-    // Phase 6: response additionally carries nonceValidated: true
     const responsePayload = {
       ...authResult,
       nonceValidated: true
     };
     
-    // Usually auth/init doesn't have a machine public key yet to sign to, 
-    // unless it's a registered machine. The envelope builder for AUTH_RESULT 
-    // might just use the backend active key to sign the result.
-    const signedResponse = await buildEnvelope(responsePayload, { session: authResult.sessionGeneration || 1, machine: 1 });
+    const generationNum = Number(authResult.sessionGeneration || 1);
+    const signedResponse = await buildEnvelope(responsePayload, generationNum);
     
-    res.json(signedResponse);
+    res.json({
+      ...signedResponse,
+      ...responsePayload
+    });
   } catch (err) {
     next(err);
   }

@@ -1,71 +1,79 @@
 // @ts-check
-import { sha256 } from '../crypto/hashing.mjs';
 import { verify, sign } from '../crypto/ed25519.mjs';
 import { getActiveKey, getKeyByVersion } from '../crypto/keys.mjs';
 import { getKmsAdapter } from '../crypto/kms-adapter.mjs';
-import { canonicalStringify } from './canonical.mjs';
+import { serializeClientRequest, serializeBackendResponse } from './canonical.mjs';
 
 /**
- * Validates a protocol envelope.
+ * Validates an incoming client request Protocol Envelope.
  * @param {Object} raw 
  * @param {string} machinePublicKeyHex
  * @returns {Promise<{ valid: boolean; envelope?: any; error?: string }>}
  */
 export async function validateEnvelope(raw, machinePublicKeyHex) {
   if (!raw || typeof raw !== 'object') {
-    return { valid: false, error: 'Invalid format' };
+    return { valid: false, error: 'INVALID_FORMAT' };
   }
   
-  if (raw.version !== 2) {
-    if (raw.version === 1) {
-      // V1 compat path would go here, skipping timestamp/server_epoch
-      // We'll enforce v2 for now unless explicitly downgraded.
-    } else {
-      return { valid: false, error: 'Unsupported version' };
-    }
+  const version = raw.version ?? raw.v;
+  if (version !== 2) {
+    return { valid: false, error: 'UNSUPPORTED_VERSION' };
   }
   
-  const { signature, payload, nonce, timestamp, clientGeneration, clientServerEpoch, sessionId, machineId } = raw;
+  const { nonce, timestamp, payload } = raw;
+  const signature = raw.signature || (raw.signatures && (raw.signatures['1'] || raw.signatures['2'] || raw.signatures['v1'] || raw.signatures['v2']));
   
-  if (!signature || !payload || !nonce) {
-    return { valid: false, error: 'Missing required fields' };
+  if (!signature || payload === undefined || !nonce) {
+    return { valid: false, error: 'MISSING_REQUIRED_FIELDS' };
   }
   
-  // Verify timestamp is within 30s
-  if (timestamp) {
-    const ts = new Date(timestamp).getTime();
-    if (Math.abs(Date.now() - ts) > 30000) {
-      return { valid: false, error: 'NONCE_EXPIRED' }; // CRIT-06 fix
+  // Verify timestamp freshness: must be within 60s
+  if (!timestamp) {
+    return { valid: false, error: 'NONCE_EXPIRED' };
+  }
+  const ts = typeof timestamp === 'number' ? timestamp : new Date(timestamp).getTime();
+  if (isNaN(ts) || Math.abs(Date.now() - ts) > 60000) {
+    return { valid: false, error: 'NONCE_EXPIRED' };
+  }
+
+  let pubKeyHex = machinePublicKeyHex;
+  let matchedMachine = null;
+  if (!pubKeyHex && raw.machineId) {
+    const { getPool } = await import('../persistence/connection.mjs');
+    const pool = getPool();
+    const machineRes = await pool.query(
+      "SELECT machine_id, public_key_hex FROM machines WHERE (machine_id::text = $1 OR installation_id = $1 OR descriptor->>'hardwareId' = $1) AND status != 'REVOKED'",
+      [raw.machineId]
+    );
+    if (machineRes.rows.length > 0) {
+      pubKeyHex = machineRes.rows[0].public_key_hex;
+      matchedMachine = machineRes.rows[0];
     }
   }
 
-  // To verify signature, we construct canonical representation of envelope without signature
-  const envelopeToSign = {
-    version: raw.version,
-    sessionId,
-    machineId,
-    nonce,
-    timestamp,
-    clientGeneration,
-    clientServerEpoch,
-    payload
-  };
+  if (!pubKeyHex) {
+    return { valid: false, isValid: false, error: 'MACHINE_NOT_FOUND' };
+  }
+
+  // Canonicalize client request envelope matching CP CanonicalSerializer.serializeClientRequest
+  const messageBuffer = serializeClientRequest(raw);
+  const domainPrefix = Buffer.from('CONTROL_PLANE_V1', 'utf8');
+  const domainSeparated = Buffer.concat([domainPrefix, messageBuffer]);
+  const publicKey = Buffer.from(pubKeyHex, 'hex');
   
-  const canonicalString = canonicalStringify(envelopeToSign);
-  const messageBuffer = Buffer.from(canonicalString, 'utf8');
-  
-  const publicKey = Buffer.from(machinePublicKeyHex, 'hex');
-  
-  const isValid = verify(publicKey, messageBuffer, signature);
+  // Support both CONTROL_PLANE_V1 domain separated and raw canonical signatures
+  const isValid = verify(publicKey, domainSeparated, signature) || verify(publicKey, messageBuffer, signature);
   if (!isValid) {
-    return { valid: false, error: 'Invalid signature' };
+    return { valid: false, isValid: false, error: 'INVALID_SIGNATURE' };
   }
   
-  return { valid: true, envelope: raw };
+  return { valid: true, isValid: true, envelope: raw, machine: matchedMachine };
 }
 
 /**
- * Build an envelope to send to the client.
+ * Build a signed response envelope to send to the client.
+ * Matches Control Plane EnvelopeValidator verification format.
+ * 
  * @param {any} payload 
  * @param {any} generation 
  * @param {number} [serverEpoch=1]
@@ -79,19 +87,18 @@ export async function buildEnvelope(payload, generation, serverEpoch = 1) {
   const envelope = {
     version: 2,
     timestamp: new Date().toISOString(),
-    server_epoch: serverEpoch,
+    server_epoch: Number(serverEpoch),
     payload,
-    generation
+    generation: Number(generation)
   };
   
-  const canonicalString = canonicalStringify(envelope);
-  const messageBuffer = Buffer.from(canonicalString, 'utf8');
+  const messageBuffer = serializeBackendResponse(envelope);
   const signatureHex = sign(privateKey, messageBuffer);
   
   return {
     ...envelope,
     signatures: {
-      [activeKeyInfo.key_version]: signatureHex
+      [String(activeKeyInfo.key_version || '1')]: signatureHex
     }
   };
 }

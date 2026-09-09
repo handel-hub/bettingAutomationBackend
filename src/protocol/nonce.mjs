@@ -21,8 +21,15 @@ export async function useNonce(nonce, epoch) {
     );
   } catch (err) {
     if (err.code === '23505') { // unique_violation
-      throw new Error('DUPLICATE_NONCE');
+      const replayErr = new Error('NONCE_REPLAYED');
+      // @ts-ignore
+      replayErr.code = 'NONCE_REPLAYED';
+      // @ts-ignore
+      replayErr.status = 403;
+      throw replayErr;
     }
     throw err;
   }
 }
+
+export const consumeNonce = useNonce;

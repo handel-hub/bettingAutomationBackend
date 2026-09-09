@@ -17,29 +17,40 @@ export async function envelopeValidator(req, res, next) {
     // In practice, we look it up by machineId from the envelope
     const { machineId } = rawEnvelope;
     if (!machineId) {
-      throw new Error('Missing machineId in envelope');
+      const err = new Error('Missing machineId in envelope');
+      err.status = 400;
+      err.code = 'INVALID_FORMAT';
+      throw err;
     }
     
     const pool = getPool();
-    const machineRes = await pool.query('SELECT public_key_hex FROM machines WHERE machine_id = $1 AND status != \'REVOKED\'', [machineId]);
+    const machineRes = await pool.query(
+      "SELECT machine_id, public_key_hex FROM machines WHERE (machine_id::text = $1 OR installation_id = $1 OR descriptor->>'hardwareId' = $1) AND status != 'REVOKED'",
+      [machineId]
+    );
     if (machineRes.rows.length === 0) {
-      res.status(401);
-      throw new Error('Machine not found or revoked');
+      const err = new Error('MACHINE_REVOKED');
+      err.status = 403;
+      err.code = 'MACHINE_REVOKED';
+      throw err;
     }
     
-    const publicKeyHex = machineRes.rows[0].public_key_hex;
+    const matchedMachine = machineRes.rows[0];
+    const publicKeyHex = matchedMachine.public_key_hex;
     
     const { valid, envelope, error } = await validateEnvelope(rawEnvelope, publicKeyHex);
     if (!valid) {
-      res.status(400);
-      throw new Error(`Envelope validation failed: ${error}`);
+      const err = new Error(error || 'INVALID_SIGNATURE');
+      err.status = (error === 'NONCE_EXPIRED' ? 401 : 403);
+      err.code = error;
+      throw err;
     }
     
     // Look up accountId from session
     if (envelope.sessionId) {
       const sessRes = await pool.query(
         "SELECT account_id FROM sessions WHERE session_id = $1 AND machine_id = $2 AND status = 'AUTHENTICATED'",
-        [envelope.sessionId, machineId]
+        [envelope.sessionId, matchedMachine.machine_id]
       );
       if (sessRes.rows.length > 0) {
         req.accountId = sessRes.rows[0].account_id;
@@ -50,7 +61,7 @@ export async function envelopeValidator(req, res, next) {
     await useNonce(envelope.nonce, envelope.clientServerEpoch);
     
     req.envelope = envelope;
-    req.machineId = machineId;
+    req.machineId = matchedMachine.machine_id;
     req.sessionId = envelope.sessionId;
     
     // Unwrap payload if object so downstream route handlers can read req.body transparently

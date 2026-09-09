@@ -71,8 +71,12 @@ export function initializePaymentAdapter(secretKey) {
         return { id: subscriptionId, plan: newPlanId };
       },
       verifyWebhookSignature(payload, signature) {
+        if (!signature) return false;
         const hash = crypto.createHmac('sha512', secretKey).update(payload).digest('hex');
-        return hash === signature;
+        const hashBuf = Buffer.from(hash, 'utf8');
+        const sigBuf = Buffer.from(signature, 'utf8');
+        if (hashBuf.length !== sigBuf.length) return false;
+        return crypto.timingSafeEqual(hashBuf, sigBuf);
       },
       async createCustomer(email) {
         const response = await paystack.customer.create({ email });

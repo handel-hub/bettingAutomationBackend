@@ -4,8 +4,20 @@ import { withTransaction } from '../../persistence/transaction.mjs';
 import { encrypt, decrypt } from '../../crypto/aead.mjs';
 import crypto from 'crypto';
 
-// Master key for AEAD AES-256-GCM encryption of stored betting passwords
-const MASTER_VAULT_KEY = crypto.createHash('sha256').update(process.env.KMS_LOCAL_SECRET || 'betting_automation_master_vault_key_32').digest();
+/**
+ * Master key for AEAD AES-256-GCM encryption of stored betting passwords.
+ * Fails closed in production if KMS_LOCAL_SECRET is not set.
+ */
+function getMasterVaultKey() {
+  const secret = process.env.KMS_LOCAL_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('FATAL: KMS_LOCAL_SECRET environment variable is required in production');
+    }
+    return crypto.createHash('sha256').update('betting_automation_master_vault_key_32').digest();
+  }
+  return crypto.createHash('sha256').update(secret).digest();
+}
 
 /**
  * Mask sensitive credentials for API responses
@@ -36,7 +48,7 @@ export async function createBettingAccount(accountId, data) {
 
   // Encrypt password using AES-256-GCM
   const aad = Buffer.from(`${accountId}:${platformDisplayName}:${accountUsername}`);
-  const { nonce, ciphertext, tag } = encrypt(MASTER_VAULT_KEY, Buffer.from(accountPassword, 'utf8'), aad);
+  const { nonce, ciphertext, tag } = encrypt(getMasterVaultKey(), Buffer.from(accountPassword, 'utf8'), aad);
 
   return withTransaction('READ COMMITTED', async (client) => {
     const insertRes = await client.query(`
@@ -317,7 +329,7 @@ export async function getDecryptedPassword(accountId, id) {
   const { platform_display_name, account_username, account_password_encrypted, password_iv, password_tag } = res.rows[0];
 
   const aad = Buffer.from(`${accountId}:${platform_display_name}:${account_username}`);
-  const decryptedBuf = decrypt(MASTER_VAULT_KEY, password_iv, account_password_encrypted, password_tag, aad);
+  const decryptedBuf = decrypt(getMasterVaultKey(), password_iv, account_password_encrypted, password_tag, aad);
   return decryptedBuf.toString('utf8');
 }
 

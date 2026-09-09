@@ -33,3 +33,41 @@ export function canonicalize(value) {
 export function canonicalStringify(value) {
   return JSON.stringify(canonicalize(value));
 }
+
+/**
+ * Serializes an outbound/inbound client request ProtocolEnvelopeV2 for Ed25519 signing/verification.
+ * Strict RFC 8785 canonical keys.
+ * 
+ * @param {Object} envelope 
+ * @returns {Buffer}
+ */
+export function serializeClientRequest(envelope) {
+  const envelopeToSign = {
+    version: envelope.version ?? 2,
+    sessionId: envelope.sessionId || '',
+    machineId: envelope.machineId,
+    nonce: envelope.nonce,
+    timestamp: envelope.timestamp,
+    clientGeneration: Number(envelope.clientGeneration ?? 1),
+    clientServerEpoch: Number(envelope.clientServerEpoch ?? 1),
+    payload: envelope.payload
+  };
+  return Buffer.from(canonicalStringify(envelopeToSign), 'utf8');
+}
+
+/**
+ * Serializes an outbound Backend response ProtocolEnvelopeV2 for Ed25519 signing.
+ * 
+ * @param {Object} envelope 
+ * @returns {Buffer}
+ */
+export function serializeBackendResponse(envelope) {
+  const envelopeToSign = {
+    version: envelope.version ?? envelope.v ?? 2,
+    timestamp: envelope.timestamp,
+    server_epoch: Number(envelope.server_epoch ?? envelope.epoch ?? 1),
+    payload: envelope.payload,
+    generation: Number(envelope.generation ?? 1)
+  };
+  return Buffer.from(canonicalStringify(envelopeToSign), 'utf8');
+}

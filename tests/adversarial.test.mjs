@@ -11,6 +11,7 @@ import { renew } from '../src/domain/session/service.mjs';
 import { reconcile } from '../src/domain/reconciliation/service.mjs';
 import { register } from '../src/domain/machine/service.mjs';
 import { claimNextEvent, completeEvent, processOutboxEvent } from '../src/outbox/worker.mjs';
+import { setSystemEpoch } from '../src/domain/system/epoch-store.mjs';
 import { getPool, closePool } from '../src/persistence/connection.mjs';
 import { httpServer } from '../src/server.mjs';
 
@@ -22,6 +23,8 @@ before(async () => {
       httpServer.listen(PORT, () => resolve(null));
     });
   }
+  const pool = getPool();
+  await pool.query("DELETE FROM machines WHERE descriptor->>'hostname' = 'test-node-automated' OR descriptor->>'os' = 'win32'");
 });
 
 test('Adversarial & Edge-Case Security Test Suite', async (t) => {
@@ -125,7 +128,8 @@ test('Adversarial & Edge-Case Security Test Suite', async (t) => {
     const partialAuth = await authenticate('tester@bettingautomation.com', 'Password123!', null, 2, 'nonce-init');
     const machine = await register(installationId, pubHex, { os: 'win32' }, selfSig, partialAuth.sessionId);
 
-    // Set server_trust_version to 5 (simulating server epoch after restore)
+    // Set server_trust_version and external system epoch to 5 (simulating server epoch after restore)
+    setSystemEpoch(5);
     await pool.query('UPDATE backend_trust_state SET server_trust_version = 5');
 
     // Case 1: Client presents older epoch (e.g. 4) with client generation > server generation
@@ -157,6 +161,9 @@ test('Adversarial & Edge-Case Security Test Suite', async (t) => {
       INSERT INTO accounts (account_id, email, credentials_hash, status)
       VALUES ($1, $2, 'dummy_hash', 'ACTIVE')
     `, [newAccId, email]);
+
+    // Clear any stale pending/processing events from earlier tests
+    await pool.query("UPDATE outbox_events SET status = 'DELIVERED' WHERE status IN ('PENDING', 'PROCESSING')");
 
     // Enqueue a charge.success outbox event for this new account
     const idempotencyKey = `evt-pay-${Date.now()}`;
@@ -198,6 +205,7 @@ test('Adversarial & Edge-Case Security Test Suite', async (t) => {
 });
 
 after(async () => {
+  setSystemEpoch(1);
   if (httpServer.listening) {
     await new Promise((resolve) => httpServer.close(resolve));
   }

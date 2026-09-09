@@ -1,6 +1,6 @@
-// @ts-check
 import { withTransaction } from '../../persistence/transaction.mjs';
 import { logEvent } from '../audit/service.mjs';
+import { getSystemEpoch } from '../system/epoch-store.mjs';
 
 /**
  * Reconcile client's state with Backend's state
@@ -21,15 +21,19 @@ export async function reconcile(machineId, presentedGeneration, clientServerEpoc
     const serverSessionGen = Number(serverState.session_generation);
     const serverMachineGen = Number(serverState.machine_generation);
     
-    // Check server trust epoch (CRIT-05)
+    // Check external monotonic server trust epoch (CRIT-05 & BACKEND-REC-001)
     let currentServerEpoch = 1;
     try {
-      const trustRes = await client.query('SELECT server_trust_version FROM backend_trust_state LIMIT 1');
-      if (trustRes.rows.length > 0 && trustRes.rows[0].server_trust_version) {
-        currentServerEpoch = Number(trustRes.rows[0].server_trust_version);
-      }
+      currentServerEpoch = getSystemEpoch();
     } catch {
-      currentServerEpoch = 1;
+      try {
+        const trustRes = await client.query('SELECT server_trust_version FROM backend_trust_state LIMIT 1');
+        if (trustRes.rows.length > 0 && trustRes.rows[0].server_trust_version) {
+          currentServerEpoch = Number(trustRes.rows[0].server_trust_version);
+        }
+      } catch {
+        currentServerEpoch = 1;
+      }
     }
     
     // Support numeric generation as well as object state

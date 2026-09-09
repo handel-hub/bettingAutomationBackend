@@ -49,7 +49,7 @@ router.post('/webhook', async (req, res, next) => {
       ''
     ).toString();
     
-    const rawPayload = JSON.stringify(req.body);
+    const rawPayload = req.rawBody || JSON.stringify(req.body);
     
     const provider = getProvider();
     if (!provider.verifyWebhookSignature(rawPayload, signature)) {

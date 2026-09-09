@@ -23,6 +23,11 @@ export async function revoke(scope, targetId, reason) {
       await client.query('UPDATE sessions SET status = \'REVOKED\' WHERE account_id = $1', [targetId]);
       await client.query('UPDATE authorizations SET status = \'REVOKED\' WHERE account_id = $1', [targetId]);
       await client.query(`
+        UPDATE machine_session_states 
+        SET session_generation = session_generation + 1, authorization_revision = authorization_revision + 1
+        WHERE account_id = $1
+      `, [targetId]);
+      await client.query(`
         UPDATE file_transfers SET status = 'CANCELLED', cancelled_at = now() 
         WHERE session_id IN (SELECT session_id FROM sessions WHERE account_id = $1)
       `, [targetId]);
@@ -33,13 +38,22 @@ export async function revoke(scope, targetId, reason) {
         UPDATE authorizations SET status = 'REVOKED' 
         WHERE session_id IN (SELECT session_id FROM sessions WHERE machine_id = $1)
       `, [targetId]);
+      await client.query(`
+        UPDATE machine_session_states 
+        SET session_generation = session_generation + 1, authorization_revision = authorization_revision + 1
+        WHERE machine_id = $1
+      `, [targetId]);
     } else if (scope === 'SESSION') {
       await client.query('UPDATE sessions SET status = \'REVOKED\' WHERE session_id = $1', [targetId]);
       await client.query('UPDATE authorizations SET status = \'REVOKED\' WHERE session_id = $1', [targetId]);
+      await client.query(`
+        UPDATE machine_session_states 
+        SET session_generation = session_generation + 1, authorization_revision = authorization_revision + 1
+        WHERE machine_id = (SELECT machine_id FROM sessions WHERE session_id = $1)
+      `, [targetId]);
     } else if (scope === 'LICENSE') {
       await client.query('UPDATE licenses SET status = \'REVOKED\', revoked_at = now() WHERE license_id = $1', [targetId]);
       await client.query('UPDATE authorizations SET status = \'REVOKED\' WHERE license_id = $1', [targetId]);
-      // And sessions tied to those authorizations? The prompt says: "license -> authorizations -> sessions"
       await client.query(`
         UPDATE sessions SET status = 'REVOKED' 
         WHERE session_id IN (SELECT session_id FROM authorizations WHERE license_id = $1)

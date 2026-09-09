@@ -32,26 +32,58 @@ export async function renew(sessionId, machineId, presentedGenerationState, clie
       throw err;
     }
     
-    // 3. Generation check - support both numeric generation and object state
-    let clientSessionGen = state.session_generation;
+    // 3. Generation check - require explicit numeric session and/or machine generation
+    let clientSessionGen;
     let clientMachineGen = state.machine_generation;
     
     if (typeof presentedGenerationState === 'number') {
       clientSessionGen = presentedGenerationState;
     } else if (presentedGenerationState && typeof presentedGenerationState === 'object') {
-      clientSessionGen = presentedGenerationState.session ?? state.session_generation;
-      clientMachineGen = presentedGenerationState.machine ?? state.machine_generation;
+      if (presentedGenerationState.session === undefined && presentedGenerationState.generation === undefined) {
+        const err = new Error('GENERATION_MISMATCH');
+        // @ts-ignore
+        err.status = 403;
+        // @ts-ignore
+        err.code = 'GENERATION_MISMATCH';
+        throw err;
+      }
+      clientSessionGen = presentedGenerationState.session ?? presentedGenerationState.generation;
+      if (presentedGenerationState.machine !== undefined) {
+        clientMachineGen = presentedGenerationState.machine;
+      }
+    } else {
+      const err = new Error('GENERATION_MISMATCH');
+      // @ts-ignore
+      err.status = 403;
+      // @ts-ignore
+      err.code = 'GENERATION_MISMATCH';
+      throw err;
     }
     
     if (Number(clientSessionGen) !== Number(state.session_generation) || 
         Number(clientMachineGen) !== Number(state.machine_generation)) {
       const err = new Error('GENERATION_MISMATCH');
+      // @ts-ignore
       err.status = 403;
+      // @ts-ignore
+      err.code = 'GENERATION_MISMATCH';
       throw err;
     }
     
-    // 4. Update session
-    await renewSessionInDb(client, sessionId);
+    // 4. Advance session generation in both machine_session_states and sessions table
+    const genRes = await client.query(`
+      UPDATE machine_session_states 
+      SET session_generation = session_generation + 1
+      WHERE machine_id = $1 AND account_id = $2
+      RETURNING session_generation
+    `, [machineId, session.account_id]);
+    const nextGeneration = genRes.rows[0] ? Number(genRes.rows[0].session_generation) : (Number(state.session_generation) + 1);
+
+    await client.query(`
+      UPDATE sessions 
+      SET session_generation = $1, renew_after = now() + interval '1 hour', expires_at = now() + interval '2 hours'
+      WHERE session_id = $2
+    `, [nextGeneration, sessionId]);
     
     // 5. Log
     await logEvent(client, {
@@ -61,7 +93,8 @@ export async function renew(sessionId, machineId, presentedGenerationState, clie
       eventType: 'SESSION_RENEWED',
       severity: 'LOW',
       actorType: 'SYSTEM',
-      result: 'SUCCESS'
+      result: 'SUCCESS',
+      metadata: { previousGeneration: state.session_generation, newGeneration: nextGeneration }
     });
     
     // 6. Issue GraceToken on session renewal (CRIT-04)
@@ -75,7 +108,9 @@ export async function renew(sessionId, machineId, presentedGenerationState, clie
     
     return {
       status: 'AUTHENTICATED',
-      sessionGeneration: state.session_generation,
+      sessionGeneration: nextGeneration,
+      generation: nextGeneration,
+      capabilities,
       graceToken
     };
   });

@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 import { Router } from 'express';
 import { operatorAuth } from '../middleware/operator-auth.mjs';
 import {
@@ -67,17 +67,32 @@ router.post('/lifecycle/stop', async (req, res, next) => {
   }
 });
 
-// POST /api/v1/automation/config/global/:category
-router.post('/config/global/:category', async (req, res, next) => {
+// Handler for updating global automation config
+const handleConfigUpdate = async (req, res, next) => {
   try {
     // @ts-ignore
     const accountId = req.accountId;
-    const result = await updateGlobalConfig(accountId, req.params.category, req.body);
+    const configValues = req.body.values !== undefined ? req.body.values : req.body;
+    const result = await updateGlobalConfig(accountId, req.params.category, configValues);
+
+    broadcast('automation:delta', {
+      type: 'CONFIG_UPDATED',
+      category: req.params.category,
+      values: configValues
+    }, accountId);
+
     res.json(result);
   } catch (err) {
     next(err);
   }
-});
+};
+
+// PUT /api/v1/automation/config/:category (Control Plane contract)
+router.put('/config/:category', handleConfigUpdate);
+
+// POST /api/v1/automation/config/:category & POST /api/v1/automation/config/global/:category (aliases)
+router.post('/config/:category', handleConfigUpdate);
+router.post('/config/global/:category', handleConfigUpdate);
 
 // POST /api/v1/automation/accounts/:id/bet-cycle
 router.post('/accounts/:id/bet-cycle', async (req, res, next) => {

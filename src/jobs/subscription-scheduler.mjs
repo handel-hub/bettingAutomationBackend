@@ -16,14 +16,27 @@ export async function scheduleSubscriptions(client) {
   `);
   
   if (res.rowCount > 0) {
-    console.log(`Expired ${res.rowCount} subscriptions. Triggering cascades...`);
-    // Enqueue outbox events or trigger cascade
+    console.log(`Expired ${res.rowCount} subscriptions. Cascading to licenses and authorizations...`);
     for (const sub of res.rows) {
-      // In reality, we might revoke the specific license tied to the subscription
-      // We will insert outbox events for the worker to handle the license downgrade/revoke
+      // 1. Mark active licenses under this account as EXPIRED
+      await client.query(`
+        UPDATE licenses 
+        SET status = 'EXPIRED', updated_at = now()
+        WHERE account_id = $1 AND status = 'VALID'
+      `, [sub.account_id]);
+
+      // 2. Cascade revocation to active authorizations
+      await client.query(`
+        UPDATE authorizations
+        SET status = 'REVOKED', updated_at = now()
+        WHERE account_id = $1 AND status = 'VALID'
+      `, [sub.account_id]);
+
+      // 3. Enqueue outbox event for external syncing
       await client.query(`
         INSERT INTO outbox_events (event_type, payload, idempotency_key)
         VALUES ('SUBSCRIPTION_EXPIRED', $1, $2)
+        ON CONFLICT (idempotency_key) DO NOTHING
       `, [JSON.stringify({ subscriptionId: sub.subscription_id, accountId: sub.account_id }), `sub-exp-${sub.subscription_id}`]);
     }
   }

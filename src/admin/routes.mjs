@@ -1,19 +1,47 @@
 // @ts-check
 import { Router } from 'express';
 import { revoke } from '../domain/revocation/service.mjs';
+import { adminLogin, verifyAdminSession } from './service.mjs';
 
 const router = Router();
 
-// Basic admin auth middleware stub
-router.use((req, res, next) => {
-  const adminToken = req.headers['authorization'];
-  if (!adminToken || adminToken !== 'Bearer supersecret_admin') {
-    return res.status(401).json({ error: 'ADMIN_AUTH_REQUIRED' });
+// Public admin login route
+router.post('/login', async (req, res, next) => {
+  try {
+    const { email, password, totpCode } = req.body;
+    if (!email || !password || !totpCode) {
+      return res.status(400).json({ error: 'Missing email, password, or totpCode' });
+    }
+    const result = await adminLogin(email, password, totpCode);
+    res.json(result);
+  } catch (err) {
+    next(err);
   }
-  next();
 });
 
-router.post('/accounts/:id/suspend', async (req, res, next) => {
+// Admin authentication middleware
+const requireAdmin = (requiredRole = 'SUPPORT') => {
+  return async (req, res, next) => {
+    try {
+      const authHeader = req.headers['authorization'];
+      if (!authHeader) {
+        return res.status(401).json({ error: 'ADMIN_AUTH_REQUIRED' });
+      }
+      const admin = await verifyAdminSession(authHeader, requiredRole);
+      // @ts-ignore
+      req.admin = admin;
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
+};
+
+router.get('/overview', requireAdmin('SUPPORT'), (req, res) => {
+  res.json({ status: 'OK' });
+});
+
+router.post('/accounts/:id/suspend', requireAdmin('SUPER_ADMIN'), async (req, res, next) => {
   try {
     await revoke('ACCOUNT', req.params.id, 'admin_suspension');
     res.json({ success: true });
@@ -22,7 +50,7 @@ router.post('/accounts/:id/suspend', async (req, res, next) => {
   }
 });
 
-router.post('/machines/:id/revoke', async (req, res, next) => {
+router.post('/machines/:id/revoke', requireAdmin('SUPPORT'), async (req, res, next) => {
   try {
     await revoke('MACHINE', req.params.id, 'admin_revocation');
     res.json({ success: true });
@@ -31,7 +59,7 @@ router.post('/machines/:id/revoke', async (req, res, next) => {
   }
 });
 
-router.post('/sessions/:id/invalidate', async (req, res, next) => {
+router.post('/sessions/:id/invalidate', requireAdmin('SUPPORT'), async (req, res, next) => {
   try {
     await revoke('SESSION', req.params.id, 'admin_invalidation');
     res.json({ success: true });
@@ -40,7 +68,7 @@ router.post('/sessions/:id/invalidate', async (req, res, next) => {
   }
 });
 
-router.post('/licenses/:id/revoke', async (req, res, next) => {
+router.post('/licenses/:id/revoke', requireAdmin('LICENSE_ADMIN'), async (req, res, next) => {
   try {
     await revoke('LICENSE', req.params.id, 'admin_license_revocation');
     res.json({ success: true });

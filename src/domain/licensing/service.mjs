@@ -14,7 +14,8 @@ export async function getActiveLicenseForAuth(client, accountId, machineId) {
     SELECT * FROM licenses 
     WHERE account_id = $1 
     AND status = 'VALID' 
-    -- EV-13: machine_binding logic could go here
+    AND (expires_at IS NULL OR expires_at > now())
+    ORDER BY issued_at DESC
     LIMIT 1
   `, [accountId]);
   
