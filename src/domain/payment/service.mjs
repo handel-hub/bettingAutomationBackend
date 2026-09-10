@@ -7,9 +7,10 @@ import { getProvider } from './provider.mjs';
  * @param {string} planId 
  * @param {string} returnUrl 
  * @param {string} idempotencyKey 
+ * @param {string} [billingInterval='monthly']
  * @returns {Promise<string>} checkout URL
  */
-export async function initiateCheckout(accountId, planId, returnUrl, idempotencyKey) {
+export async function initiateCheckout(accountId, planId, returnUrl, idempotencyKey, billingInterval = 'monthly') {
   const provider = getProvider();
   
   // Notice we do NOT write to licenses, authorizations, or subscriptions here.
@@ -20,6 +21,6 @@ export async function initiateCheckout(accountId, planId, returnUrl, idempotency
     customerId = await provider.createCustomer('dummy@example.com'); 
   }
   
-  const checkoutUrl = await provider.createCheckoutSession(accountId, planId, returnUrl);
+  const checkoutUrl = await provider.createCheckoutSession(accountId, planId, returnUrl, billingInterval);
   return checkoutUrl;
 }

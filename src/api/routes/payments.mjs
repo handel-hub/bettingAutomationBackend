@@ -26,14 +26,16 @@ router.post('/checkout', async (req, res, next) => {
   }
 });
 
-// Callback redirect target for customer browser after Paystack payment
+// Callback redirect target for customer browser after payment
 router.get('/callback', (req, res) => {
-  const { reference, trxref } = req.query;
+  const reference = req.query.reference || req.query.trxref || req.query.tx_ref || req.query.transaction_id || 'N/A';
+  const status = req.query.status || 'success';
   res.send(`
     <html>
       <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
         <h2>Payment Processed!</h2>
-        <p>Reference: ${reference || trxref || 'N/A'}</p>
+        <p>Reference: ${reference}</p>
+        <p>Status: ${status}</p>
         <p>You can close this window and return to your application.</p>
       </body>
     </html>
@@ -44,6 +46,10 @@ router.get('/callback', (req, res) => {
 router.post('/webhook', async (req, res, next) => {
   try {
     const signature = (
+      req.headers['verif-hash'] ||
+      req.headers['verif_hash'] ||
+      req.headers['flutterwave-signature'] ||
+      req.headers['x-flutterwave-signature'] ||
       req.headers['x-paystack-signature'] || 
       req.headers['x-provider-signature'] || 
       ''
@@ -53,15 +59,56 @@ router.post('/webhook', async (req, res, next) => {
     
     const provider = getProvider();
     if (!provider.verifyWebhookSignature(rawPayload, signature)) {
-      console.warn('Paystack webhook signature verification failed');
+      console.warn('Payment webhook signature verification failed');
       return res.status(400).json({ error: 'Invalid signature' });
     }
     
-    // Extract info from payload depending on provider (Paystack, etc.)
+    // Extract info from payload supporting both Flutterwave and Paystack schemas
     const providerEventId = String(req.body.data?.id || req.body.id || `evt-${Date.now()}`);
-    const eventType = req.body.event || 'UNKNOWN_EVENT';
-    let accountId = req.body.data?.metadata?.account_id || req.body.account_id;
+    let eventType = req.body.event || 'UNKNOWN_EVENT';
+
+    // Normalize Flutterwave charge.completed based on data.status
+    if (eventType === 'charge.completed') {
+      const chargeStatus = req.body.data?.status;
+      if (chargeStatus === 'successful') {
+        eventType = 'charge.completed';
+      } else {
+        eventType = 'charge.failed';
+      }
+    }
+
+    let accountId = req.body.data?.meta?.account_id || req.body.data?.metadata?.account_id || req.body.account_id;
+    const txRef = req.body.data?.tx_ref || req.body.data?.reference;
+    const isFlw = Boolean(
+      req.headers['verif-hash'] ||
+      req.headers['verif_hash'] ||
+      req.headers['flutterwave-signature'] ||
+      req.body.data?.flw_ref ||
+      req.body.data?.tx_ref
+    );
+
+    // If accountId is not directly in webhook payload, verify transaction with Flutterwave API to fetch full metadata
+    if (!accountId && isFlw && req.body.data?.id && typeof provider.verifyTransaction === 'function') {
+      try {
+        const verified = await provider.verifyTransaction(req.body.data.id);
+        if (verified?.data?.meta?.account_id) {
+          accountId = verified.data.meta.account_id;
+          req.body.data = { ...req.body.data, ...verified.data };
+        }
+      } catch (err) {
+        console.warn('Flutterwave verifyTransaction fallback error:', err.message);
+      }
+    }
+
+    // Fallback: extract UUID from tx_ref if present
+    if (!accountId && txRef) {
+      const uuidMatch = txRef.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+      if (uuidMatch) {
+        accountId = uuidMatch[1];
+      }
+    }
     
+    // Fallback: lookup by customer email
     if (!accountId && req.body.data?.customer?.email) {
       const pool = getPool();
       const accRes = await pool.query('SELECT account_id FROM accounts WHERE email = $1', [req.body.data.customer.email]);
@@ -75,9 +122,10 @@ router.post('/webhook', async (req, res, next) => {
       return res.status(400).json({ error: 'Unresolvable account_id in payment webhook' });
     }
     
-    const idempotencyKey = req.headers['idempotency-key']?.toString() || providerEventId;
-    
-    await handleWebhook('paystack', providerEventId, eventType, accountId, idempotencyKey, req.body);
+    const idempotencyKey = req.headers['idempotency-key']?.toString() || txRef || providerEventId;
+    const providerName = isFlw ? 'flutterwave' : 'paystack';
+
+    await handleWebhook(providerName, providerEventId, eventType, accountId, idempotencyKey, req.body);
     
     // Return 200 immediately, async worker handles the rest
     res.status(200).send('OK');

@@ -86,7 +86,11 @@ test('End-to-End Integration Flow: Auth -> Machine Registration -> Full Auth -> 
   });
   assert.strictEqual(checkoutRes.status, 200, 'Paystack checkout should return 200');
   const checkoutData = await checkoutRes.json();
-  assert.ok(checkoutData.checkoutUrl.startsWith('https://checkout.paystack.com/'), 'Must return a valid Paystack checkout URL');
+  assert.ok(
+    checkoutData.checkoutUrl.startsWith('https://checkout.paystack.com/') ||
+    checkoutData.checkoutUrl.includes('flutterwave.com'),
+    'Must return a valid payment checkout URL'
+  );
 });
 
 after(async () => {

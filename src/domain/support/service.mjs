@@ -15,24 +15,48 @@ export async function getCustomerCareSnapshot(accountId) {
   );
   const openTicketCount = Number(ticketRes.rows[0]?.count || 0);
 
-  const contactMethods = [
-    {
-      id: 'ticket',
-      title: 'Support Ticket',
-      description: 'Submit an incident or request operational assistance',
-      actionType: 'INTERNAL_ROUTE',
-      actionTarget: '/workspace/support/tickets/new',
-      available: true
-    },
-    {
-      id: 'live_chat',
-      title: 'Live Chat (Discord / Telegram)',
-      description: 'Real-time peer and engineer operator channel',
-      actionType: 'EXTERNAL_LINK',
-      actionTarget: 'https://discord.gg/bettingautomation',
-      available: true
+  let contactMethods = [];
+  try {
+    const chanRes = await pool.query(
+      "SELECT id, title, description, action_type, action_target, icon, is_available FROM support_channels WHERE is_available = true ORDER BY sort_order ASC"
+    );
+    if (chanRes.rows.length > 0) {
+      contactMethods = chanRes.rows.map(c => ({
+        id: c.id,
+        title: c.title,
+        description: c.description,
+        actionType: c.action_type,
+        actionTarget: c.action_target,
+        icon: c.icon || null,
+        available: c.is_available
+      }));
     }
-  ];
+  } catch {
+    // fallback if table query fails
+  }
+
+  if (contactMethods.length === 0) {
+    contactMethods = [
+      {
+        id: 'ticket',
+        title: 'Support Ticket',
+        description: 'Submit an incident or request operational assistance',
+        actionType: 'INTERNAL_ROUTE',
+        actionTarget: '/workspace/support/tickets/new',
+        icon: 'ticket',
+        available: true
+      },
+      {
+        id: 'discord',
+        title: 'Community & Ops Discord',
+        description: 'Real-time peer and engineer operator channel',
+        actionType: 'EXTERNAL_LINK',
+        actionTarget: 'https://discord.gg/bettingautomation',
+        icon: 'message-square',
+        available: true
+      }
+    ];
+  }
 
   return {
     openTicketCount,
@@ -47,6 +71,58 @@ export async function getCustomerCareSnapshot(accountId) {
     },
     documentationLastSync: new Date().toISOString(),
     systemHealthSummary: 'Healthy'
+  };
+}
+
+/**
+ * List all support channels (admin / management)
+ */
+export async function listSupportChannels() {
+  const pool = getPool();
+  const res = await pool.query('SELECT * FROM support_channels ORDER BY sort_order ASC');
+  return res.rows.map(c => ({
+    id: c.id,
+    title: c.title,
+    description: c.description,
+    actionType: c.action_type,
+    actionTarget: c.action_target,
+    icon: c.icon || null,
+    isAvailable: c.is_available,
+    sortOrder: c.sort_order
+  }));
+}
+
+/**
+ * Upsert support channel
+ * @param {Object} channel 
+ */
+export async function upsertSupportChannel(channel) {
+  const pool = getPool();
+  const { id, title, description, actionType = 'EXTERNAL_LINK', actionTarget, icon = null, isAvailable = true, sortOrder = 10 } = channel;
+  const res = await pool.query(`
+    INSERT INTO support_channels (id, title, description, action_type, action_target, icon, is_available, sort_order, updated_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+    ON CONFLICT (id) DO UPDATE SET
+      title = EXCLUDED.title,
+      description = EXCLUDED.description,
+      action_type = EXCLUDED.action_type,
+      action_target = EXCLUDED.action_target,
+      icon = EXCLUDED.icon,
+      is_available = EXCLUDED.is_available,
+      sort_order = EXCLUDED.sort_order,
+      updated_at = now()
+    RETURNING *
+  `, [id, title, description, actionType, actionTarget, icon, isAvailable, sortOrder]);
+  const c = res.rows[0];
+  return {
+    id: c.id,
+    title: c.title,
+    description: c.description,
+    actionType: c.action_type,
+    actionTarget: c.action_target,
+    icon: c.icon || null,
+    isAvailable: c.is_available,
+    sortOrder: c.sort_order
   };
 }
 

@@ -74,4 +74,26 @@ router.post('/diagnostics', async (req, res, next) => {
   }
 });
 
+// GET /api/v1/support/channels - List all support contact channels
+router.get('/channels', async (req, res, next) => {
+  try {
+    const { listSupportChannels } = await import('../../domain/support/service.mjs');
+    const channels = await listSupportChannels();
+    res.json(channels);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/support/channels - Upsert support contact channel (admin/ops)
+router.post('/channels', async (req, res, next) => {
+  try {
+    const { upsertSupportChannel } = await import('../../domain/support/service.mjs');
+    const channel = await upsertSupportChannel(req.body);
+    res.status(201).json(channel);
+  } catch (err) {
+    next(err);
+  }
+});
+
 export default router;

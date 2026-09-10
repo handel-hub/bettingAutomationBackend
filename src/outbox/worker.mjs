@@ -81,14 +81,18 @@ export async function processOutboxEvent(event) {
     } else if (event.event_type.startsWith('PAYMENT_') || event.event_type.startsWith('charge.')) {
       const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
       
-      // Paystack charges: event is 'charge.success'
-      if (event.event_type === 'charge.success' || event.event_type === 'PAYMENT_SUCCESS') {
-        const accountId = payload.data?.metadata?.account_id || payload.account_id;
+      const isFlw = Boolean(payload.data?.flw_ref || payload.data?.tx_ref || payload.data?.meta);
+      const isFlwSuccess = (event.event_type === 'charge.completed' || event.event_type === 'PAYMENT_SUCCESS') && (payload.data?.status === 'successful' || !payload.data?.status);
+      const isPaystackSuccess = event.event_type === 'charge.success' || event.event_type === 'PAYMENT_SUCCESS';
+
+      // 1. Success charge processing
+      if (isPaystackSuccess || isFlwSuccess) {
+        const accountId = payload.data?.meta?.account_id || payload.data?.metadata?.account_id || payload.account_id;
         console.log(`✓ Processing successful payment for account: ${accountId}`);
         
         if (accountId) {
-          const planId = payload.data?.metadata?.plan_id || payload.plan_id || 'PRO';
-          const ref = payload.data?.reference || `ref-${Date.now()}`;
+          const planId = payload.data?.meta?.plan_id || payload.data?.metadata?.plan_id || payload.plan_id || 'PRO';
+          const ref = payload.data?.tx_ref || payload.data?.reference || `ref-${Date.now()}`;
           
           // Fetch entitlements for capabilities & limits
           let capabilities = ['CAP_AUTOMATION_START', 'CAP_AUTOMATION_STOP', 'CAP_FILE_UPLOAD', 'CAP_TACTICAL_BET', 'CAP_CASH_OUT'];
@@ -111,7 +115,7 @@ export async function processOutboxEvent(event) {
               [planId, accountId]
             );
           } else {
-            const providerSubId = payload.data?.subscription_code || `sub-${ref}`;
+            const providerSubId = payload.data?.subscription_code || payload.data?.flw_ref || `sub-${ref}`;
             await client.query(`
               INSERT INTO subscriptions (account_id, provider_subscription_id, plan_id, status, current_period_start, current_period_end)
               VALUES ($1, $2, $3, 'ACTIVE', now(), now() + interval '30 days')
@@ -134,27 +138,47 @@ export async function processOutboxEvent(event) {
             `, [accountId, planId, JSON.stringify(capabilities), JSON.stringify(limits)]);
           }
 
-          // 3. Persist invoice record in invoices table
-          const rawAmount = payload.data?.amount || 1000000;
-          const majorAmount = (typeof rawAmount === 'number' && rawAmount > 1000) ? (rawAmount / 100) : rawAmount;
+          // 3. Persist invoice record in invoices table with normalized currency amount and statutory VAT
+          let majorAmount;
+          if (isFlw) {
+            majorAmount = Number(payload.data?.charged_amount || payload.data?.amount || 10000);
+          } else {
+            const rawAmount = payload.data?.amount || 1000000;
+            majorAmount = (typeof rawAmount === 'number' && rawAmount > 1000) ? (rawAmount / 100) : rawAmount;
+          }
           const invId = `inv-${ref}`;
-          
+          const taxRate = 0.075;
+          const subtotal = Math.round((majorAmount / (1 + taxRate)) * 100) / 100;
+          const taxAmount = Math.round((majorAmount - subtotal) * 100) / 100;
+          const billingInterval = payload.data?.meta?.billing_interval || payload.data?.metadata?.billing_interval || 'monthly';
+          const planNameResolved = planId ? (planId.charAt(0).toUpperCase() + planId.slice(1).toLowerCase()) : 'Pro';
+
           await client.query(`
-            INSERT INTO invoices (id, account_id, reference, amount, currency, status, paid_at, receipt_url)
-            VALUES ($1, $2, $3, $4, 'NGN', 'Paid', now(), $5)
+            INSERT INTO invoices (
+              id, account_id, reference, amount, currency, status, paid_at, receipt_url,
+              subtotal, tax_amount, tax_rate, plan_name, billing_interval, currency_symbol
+            )
+            VALUES ($1, $2, $3, $4, 'NGN', 'Paid', now(), $5, $6, $7, $8, $9, $10, '₦')
             ON CONFLICT (id) DO UPDATE SET
               status = 'Paid',
-              paid_at = now()
-          `, [invId, accountId, ref, majorAmount, payload.data?.receipt_url || null]);
+              paid_at = now(),
+              subtotal = EXCLUDED.subtotal,
+              tax_amount = EXCLUDED.tax_amount,
+              tax_rate = EXCLUDED.tax_rate,
+              plan_name = EXCLUDED.plan_name,
+              billing_interval = EXCLUDED.billing_interval,
+              currency_symbol = EXCLUDED.currency_symbol
+          `, [invId, accountId, ref, majorAmount, payload.data?.receipt_url || null, subtotal, taxAmount, taxRate, planNameResolved, billingInterval]);
         }
       } else if (
         event.event_type === 'charge.failed' || 
         event.event_type === 'PAYMENT_FAILED' ||
+        (event.event_type === 'charge.completed' && payload.data?.status && payload.data?.status !== 'successful') ||
         event.event_type.includes('fail') ||
         event.event_type.includes('declined')
       ) {
-        const accountId = payload.data?.metadata?.account_id || payload.account_id;
-        const reason = payload.data?.gateway_response || payload.reason || 'Payment declined by bank';
+        const accountId = payload.data?.meta?.account_id || payload.data?.metadata?.account_id || payload.account_id;
+        const reason = payload.data?.gateway_response || payload.data?.processor_response || payload.reason || 'Payment declined by bank';
         console.warn(`⚠ Processing failed/declined payment for account ${accountId}: ${reason}`);
         
         if (accountId) {
@@ -166,16 +190,17 @@ export async function processOutboxEvent(event) {
 
           // Audit log the failed payment attempt
           const { logEvent } = await import('../domain/audit/service.mjs');
+          const providerName = isFlw ? 'flutterwave' : 'paystack';
           await logEvent(client, {
             accountId,
             eventType: 'PAYMENT_FAILED',
             severity: 'MEDIUM',
             actorType: 'PROVIDER',
-            actorId: 'paystack',
+            actorId: providerName,
             result: 'FAILURE',
             reason,
             metadata: {
-              reference: payload.data?.reference,
+              reference: payload.data?.tx_ref || payload.data?.reference,
               amount: payload.data?.amount,
               channel: payload.data?.channel
             }

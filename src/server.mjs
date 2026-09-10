@@ -23,6 +23,9 @@ import settingsRouter from './api/routes/settings.mjs';
 import notificationsRouter from './api/routes/notifications.mjs';
 import systemRouter from './api/routes/system.mjs';
 import supportRouter from './api/routes/support.mjs';
+import platformsRouter from './api/routes/platforms.mjs';
+import telemetryRouter from './api/routes/telemetry.mjs';
+import preludeRouter from './api/routes/prelude.mjs';
 import { initWebSocketServer } from './websocket/server.mjs';
 import http from 'http';
 
@@ -55,14 +58,27 @@ app.use('/api/payments', paymentRouter);
 app.use('/admin', adminRouter);
 app.use('/api/v1/admin', adminRouter);
 
-// Domain 1-7 Unified /api/v1 Mounts
+// Domain 1-7 & Target Unified /api/v1 and root Mounts
 app.use('/api/v1/accounts', accountsRouter);
+app.use('/accounts', accountsRouter);
 app.use('/api/v1/automation', automationRouter);
+app.use('/automation', automationRouter);
 app.use('/api/v1/billing', billingRouter);
+app.use('/billing', billingRouter);
 app.use('/api/v1/settings', settingsRouter);
+app.use('/settings', settingsRouter);
 app.use('/api/v1/notifications', notificationsRouter);
+app.use('/notifications', notificationsRouter);
 app.use('/api/v1/system', systemRouter);
+app.use('/system', systemRouter);
 app.use('/api/v1/support', supportRouter);
+app.use('/support', supportRouter);
+app.use('/api/v1/platforms', platformsRouter);
+app.use('/platforms', platformsRouter);
+app.use('/api/v1/telemetry', telemetryRouter);
+app.use('/telemetry', telemetryRouter);
+app.use('/api/v1/prelude', preludeRouter);
+app.use('/prelude', preludeRouter);
 
 app.get('/health/live', (req, res) => res.json({ status: 'ok' }));
 app.get('/health/ready', (req, res) => res.json({ status: 'ready' }));
@@ -75,7 +91,7 @@ import { initializeJobs } from './jobs/index.mjs';
 const config = loadConfig();
 const port = config.PORT || 3001;
 
-initializePaymentAdapter(config.PAYSTACK_SECRET_KEY || config.PAYMENT_WEBHOOK_SECRET);
+initializePaymentAdapter(config.PAYMENT_PROVIDER, config);
 
 // Create HTTP server to attach both Express and WebSocket
 export const httpServer = http.createServer(app);

@@ -20,6 +20,71 @@ function getMasterVaultKey() {
 }
 
 /**
+ * @typedef {Object} AccountActionContract
+ * @property {string} id
+ * @property {string} label
+ * @property {string} icon
+ * @property {boolean} disabled
+ * @property {string | null} disabledReason
+ * @property {'default' | 'primary' | 'danger' | 'warning'} variant
+ */
+
+/**
+ * Format server-driven action buttons according to Contract Section 7 & 8.1
+ * @param {string[] | Object[]} [rawActions]
+ * @param {string} [backendState]
+ * @returns {AccountActionContract[]}
+ */
+export function formatAccountActions(rawActions, backendState = 'ACTIVE') {
+  if (Array.isArray(rawActions) && rawActions.length > 0 && typeof rawActions[0] === 'object' && rawActions[0].id) {
+    // @ts-ignore
+    return rawActions;
+  }
+
+  /** @type {AccountActionContract[]} */
+  const actions = [];
+  if (backendState === 'ACTIVE') {
+    actions.push({
+      id: 'DEACTIVATE_ACCOUNT',
+      label: 'Deactivate Account',
+      icon: 'pause',
+      disabled: false,
+      disabledReason: null,
+      variant: 'warning'
+    });
+  } else {
+    actions.push({
+      id: 'ACTIVATE_ACCOUNT',
+      label: 'Activate Account',
+      icon: 'play',
+      disabled: false,
+      disabledReason: null,
+      variant: 'primary'
+    });
+  }
+
+  actions.push({
+    id: 'EDIT_CREDENTIALS',
+    label: 'Edit Credentials',
+    icon: 'edit',
+    disabled: false,
+    disabledReason: null,
+    variant: 'default'
+  });
+
+  actions.push({
+    id: 'DELETE_ACCOUNT',
+    label: 'Delete Account',
+    icon: 'trash-2',
+    disabled: false,
+    disabledReason: null,
+    variant: 'danger'
+  });
+
+  return actions;
+}
+
+/**
  * Mask sensitive credentials for API responses
  * @param {string} [pass]
  * @returns {string}
@@ -88,7 +153,7 @@ export async function createBettingAccount(accountId, data) {
       statusDescription: acc.status_description,
       warningMessage: acc.warning_message,
       isSelectable: acc.is_selectable,
-      availableActions: acc.available_actions,
+      availableActions: formatAccountActions(acc.available_actions, acc.backend_state),
       pendingOperation: acc.pending_operation,
       tags: acc.tags || [],
       lastUpdated: acc.updated_at.toISOString(),
@@ -144,7 +209,7 @@ export async function listBettingAccounts(accountId, options = {}) {
     statusDescription: acc.status_description,
     warningMessage: acc.warning_message,
     isSelectable: acc.is_selectable,
-    availableActions: acc.available_actions || ['ACTIVATE', 'DELETE'],
+    availableActions: formatAccountActions(acc.available_actions, acc.backend_state),
     pendingOperation: acc.pending_operation,
     tags: acc.tags || [],
     lastUpdated: acc.updated_at.toISOString(),
@@ -202,7 +267,7 @@ export async function getBettingAccount(accountId, id) {
     statusDescription: acc.status_description,
     warningMessage: acc.warning_message,
     isSelectable: acc.is_selectable,
-    availableActions: acc.available_actions || ['ACTIVATE', 'DELETE'],
+    availableActions: formatAccountActions(acc.available_actions, acc.backend_state),
     pendingOperation: acc.pending_operation,
     tags: acc.tags || [],
     lastUpdated: acc.updated_at.toISOString(),
@@ -236,7 +301,7 @@ export async function getBettingAccount(accountId, id) {
 export async function executeAccountAction(accountId, id, actionType) {
   const pool = getPool();
 
-  if (actionType === 'DELETE_ACCOUNT') {
+  if (actionType === 'DELETE_ACCOUNT' || actionType === 'DELETE') {
     const res = await pool.query('DELETE FROM betting_accounts WHERE id = $1 AND account_id = $2 RETURNING id', [id, accountId]);
     if (res.rows.length === 0) throw new Error('Account not found');
     return { success: true, accountId: id, action: 'DELETED' };
@@ -246,14 +311,18 @@ export async function executeAccountAction(accountId, id, actionType) {
   let category = 'Healthy';
   let description = 'Operating normally';
 
-  if (actionType === 'DEACTIVATE_ACCOUNT') {
+  if (actionType === 'DEACTIVATE_ACCOUNT' || actionType === 'DEACTIVATE') {
     newState = 'SUSPENDED';
     category = 'Neutral';
     description = 'Account deactivated by operator';
-  } else if (actionType === 'ARCHIVE_ACCOUNT') {
+  } else if (actionType === 'ARCHIVE_ACCOUNT' || actionType === 'ARCHIVE') {
     newState = 'ARCHIVED';
     category = 'Neutral';
     description = 'Account archived';
+  } else if (actionType === 'ACTIVATE_ACCOUNT' || actionType === 'ACTIVATE') {
+    newState = 'ACTIVE';
+    category = 'Healthy';
+    description = 'Operating normally';
   }
 
   const res = await pool.query(`

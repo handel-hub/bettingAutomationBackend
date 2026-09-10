@@ -1,18 +1,59 @@
 // @ts-check
 import { setProvider } from '../../domain/payment/provider.mjs';
+import { FlutterwaveAdapter } from './flutterwave-adapter.mjs';
 import { Paystack } from 'paystack-sdk';
 import crypto from 'crypto';
 
 /**
- * Initializes the payment adapter using Paystack.
- * @param {string} secretKey 
+ * Initializes the payment adapter.
+ * Supports Flutterwave, Paystack, and Stub providers.
+ * Backward compatible with initializePaymentAdapter(secretKey).
+ * @param {string | Object} [providerOrSecretKey] 
+ * @param {Object} [options]
  */
-export function initializePaymentAdapter(secretKey) {
-  if (secretKey && secretKey.startsWith('sk_')) {
-    console.log('Initializing Paystack payment provider');
-    const paystack = new Paystack(secretKey);
+export function initializePaymentAdapter(providerOrSecretKey, options = {}) {
+  let providerType = 'stub';
+  let config = typeof providerOrSecretKey === 'object' && providerOrSecretKey !== null ? { ...providerOrSecretKey } : { ...options };
 
-    setProvider({
+  if (typeof providerOrSecretKey === 'string') {
+    if (providerOrSecretKey === 'flutterwave') {
+      providerType = 'flutterwave';
+    } else if (providerOrSecretKey === 'paystack' || providerOrSecretKey.startsWith('sk_')) {
+      providerType = 'paystack';
+      if (providerOrSecretKey.startsWith('sk_')) {
+        config.secretKey = providerOrSecretKey;
+      }
+    } else if (providerOrSecretKey === 'stub') {
+      providerType = 'stub';
+    } else if (providerOrSecretKey.startsWith('FLWSECK_')) {
+      providerType = 'flutterwave';
+      config.secretKey = providerOrSecretKey;
+    }
+  } else if (config.PAYMENT_PROVIDER) {
+    providerType = config.PAYMENT_PROVIDER;
+  }
+
+  // 1. Flutterwave Provider
+  if (providerType === 'flutterwave') {
+    console.log('Initializing Flutterwave payment provider');
+    const flw = new FlutterwaveAdapter({
+      secretKey: config.FLW_SECRET_KEY || config.secretKey,
+      publicKey: config.FLW_PUBLIC_KEY || config.publicKey,
+      encryptionKey: config.FLW_ENCRYPTION_KEY || config.FLW_SECRET_HASH || config.encryptionKey,
+      webhookSecretHash: config.WEBHOOK_SECRET_HASH || config.FLW_WEBHOOK_SECRET_HASH || config.secretHash || config.FLW_SECRET_HASH || config.PAYMENT_WEBHOOK_SECRET,
+      baseUrl: config.FLW_BASE_URL || config.baseUrl
+    });
+    setProvider(flw);
+    return flw;
+  }
+
+  // 2. Paystack Provider
+  const paystackSecret = config.PAYSTACK_SECRET_KEY || config.secretKey || (typeof providerOrSecretKey === 'string' && providerOrSecretKey.startsWith('sk_') ? providerOrSecretKey : null);
+  if (providerType === 'paystack' && paystackSecret && paystackSecret.startsWith('sk_')) {
+    console.log('Initializing Paystack payment provider');
+    const paystack = new Paystack(paystackSecret);
+
+    const p = {
       async createCheckoutSession(accountId, planId, returnUrl) {
         let email = `${accountId}@bettingautomation.io`; 
         let amount = 1000000; // ₦10,000 in Kobo default
@@ -50,7 +91,6 @@ export function initializePaymentAdapter(secretKey) {
         return response.data.authorization_url;
       },
       async createSubscription(customerId, planId) {
-        // Paystack subscription requires customer email/code and plan code
         const response = await paystack.subscription.create({
           customer: customerId,
           plan: planId
@@ -59,20 +99,18 @@ export function initializePaymentAdapter(secretKey) {
         return { id: response.data.subscription_code };
       },
       async cancelSubscription(subscriptionId) {
-        // Paystack uses disable to cancel
         const response = await paystack.subscription.disable({
           code: subscriptionId,
-          token: 'dummy_token' // Would need email token in reality
+          token: 'dummy_token'
         });
         return { id: subscriptionId, status: 'cancelled' };
       },
       async changeSubscriptionPlan(subscriptionId, newPlanId) {
-        // No direct change plan in Paystack, requires cancelling and creating new
         return { id: subscriptionId, plan: newPlanId };
       },
       verifyWebhookSignature(payload, signature) {
         if (!signature) return false;
-        const hash = crypto.createHmac('sha512', secretKey).update(payload).digest('hex');
+        const hash = crypto.createHmac('sha512', paystackSecret).update(payload).digest('hex');
         const hashBuf = Buffer.from(hash, 'utf8');
         const sigBuf = Buffer.from(signature, 'utf8');
         if (hashBuf.length !== sigBuf.length) return false;
@@ -84,34 +122,39 @@ export function initializePaymentAdapter(secretKey) {
         return response.data.customer_code;
       },
       async getCustomer(accountId) {
-        // Stub: In reality we would query DB for customer_code
         return null;
       }
-    });
-  } else {
-    console.log('Initializing stub payment provider (No Paystack Secret Key)');
-    setProvider({
-      async createCheckoutSession(accountId, planId, returnUrl) {
-        return `https://checkout.provider.com/${planId}?account=${accountId}`;
-      },
-      async createSubscription(customerId, planId) {
-        return { id: `sub_${Date.now()}` };
-      },
-      async cancelSubscription(subscriptionId) {
-        return { id: subscriptionId, status: 'cancelled' };
-      },
-      async changeSubscriptionPlan(subscriptionId, newPlanId) {
-        return { id: subscriptionId, plan: newPlanId };
-      },
-      verifyWebhookSignature(payload, signature) {
-        return true; // Stub allows all
-      },
-      async createCustomer(email) {
-        return `cust_${Date.now()}`;
-      },
-      async getCustomer(accountId) {
-        return `cust_${accountId}`;
-      }
-    });
+    };
+    setProvider(p);
+    return p;
   }
+
+  // 3. Stub Provider Fallback
+  console.log('Initializing stub payment provider');
+  const stub = {
+    async createCheckoutSession(accountId, planId, returnUrl) {
+      return `https://checkout.provider.com/${planId}?account=${accountId}`;
+    },
+    async createSubscription(customerId, planId) {
+      return { id: `sub_${Date.now()}` };
+    },
+    async cancelSubscription(subscriptionId) {
+      return { id: subscriptionId, status: 'cancelled' };
+    },
+    async changeSubscriptionPlan(subscriptionId, newPlanId) {
+      return { id: subscriptionId, plan: newPlanId };
+    },
+    verifyWebhookSignature(payload, signature) {
+      return true; // Stub allows all
+    },
+    async createCustomer(email) {
+      return `cust_${Date.now()}`;
+    },
+    async getCustomer(accountId) {
+      return `cust_${accountId}`;
+    }
+  };
+  setProvider(stub);
+  return stub;
 }
+
