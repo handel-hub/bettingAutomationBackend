@@ -3,8 +3,25 @@ import { WebSocketServer, WebSocket } from 'ws';
 
 import { getPool } from '../persistence/connection.mjs';
 
+import crypto from 'crypto';
+
 /** @type {WebSocketServer | null} */
 let wssInstance = null;
+
+/**
+ * Per-account monotonic sequence number map for gap detection.
+ * @type {Map<string, number>}
+ */
+const accountSequences = new Map();
+
+/**
+ * Get current sequence number for an account.
+ * @param {string} accountId 
+ * @returns {number}
+ */
+export function getAccountSequence(accountId) {
+  return accountSequences.get(accountId) || 0;
+}
 
 /**
  * Initialize the WebSocket Server on the provided HTTP server.
@@ -17,6 +34,7 @@ export function initWebSocketServer(httpServer) {
     server: httpServer,
     path: '/ws/v1/events'
   });
+  wssInstance = wss;
 
   wss.on('connection', async (ws, req) => {
     try {
@@ -57,9 +75,14 @@ export function initWebSocketServer(httpServer) {
       // @ts-ignore
       ws.sessionId = authenticatedSessionId;
 
-      // Send initial handshake envelope
+      const currentSeq = getAccountSequence(authenticatedAccountId);
+
+      // Send initial handshake envelope matching Server-to-ACP Event specification
       ws.send(JSON.stringify({
+        eventId: `evt_init_${crypto.randomUUID()}`,
+        eventType: 'app:state',
         topic: 'app:state',
+        sequenceNumber: currentSeq,
         timestamp: new Date().toISOString(),
         payload: {
           state: 'Authorized',
@@ -94,27 +117,66 @@ export function initWebSocketServer(httpServer) {
 }
 
 /**
+ * Emits a structured Server-to-ACP event envelope with monotonic per-account sequence number.
+ * @param {string} accountId
+ * @param {string} eventType
+ * @param {any} payload
+ * @returns {Object} The transmitted event envelope
+ */
+export function emitServerEvent(accountId, eventType, payload) {
+  const nextSeq = (accountSequences.get(accountId) || 0) + 1;
+  accountSequences.set(accountId, nextSeq);
+
+  const eventEnvelope = {
+    eventId: `evt_${crypto.randomUUID()}`,
+    eventType,
+    topic: eventType, // Backward-compatibility bridge
+    sequenceNumber: nextSeq,
+    timestamp: new Date().toISOString(),
+    payload
+  };
+
+  if (!wssInstance) return eventEnvelope;
+
+  const rawMessage = JSON.stringify(eventEnvelope);
+  for (const client of wssInstance.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      // @ts-ignore
+      if (!client.accountId || client.accountId === accountId) {
+        client.send(rawMessage);
+      }
+    }
+  }
+
+  return eventEnvelope;
+}
+
+/**
  * Broadcast an event envelope to connected WebSocket clients, isolated by targetAccountId if specified.
+ * Adapts legacy calls into the structured Server-to-ACP event stream.
  * @param {string} topic 
  * @param {any} payload 
  * @param {string | null} [targetAccountId=null]
  */
 export function broadcast(topic, payload, targetAccountId = null) {
+  if (targetAccountId) {
+    return emitServerEvent(targetAccountId, topic, payload);
+  }
+
   if (!wssInstance) return;
 
-  const message = JSON.stringify({
+  const globalEnvelope = {
+    eventId: `evt_${crypto.randomUUID()}`,
+    eventType: topic,
     topic,
     timestamp: new Date().toISOString(),
     payload
-  });
+  };
 
+  const rawMessage = JSON.stringify(globalEnvelope);
   for (const client of wssInstance.clients) {
     if (client.readyState === WebSocket.OPEN) {
-      // @ts-ignore
-      if (targetAccountId && client.accountId && client.accountId !== targetAccountId) {
-        continue;
-      }
-      client.send(message);
+      client.send(rawMessage);
     }
   }
 }

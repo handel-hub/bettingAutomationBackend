@@ -41,43 +41,17 @@ export async function getAutomationSnapshot(accountId) {
     name: r.name,
     platformDisplayName: r.platform_display_name,
     accountUsername: r.account_username,
-    accountStatus: r.account_status || 'IDLE',
-    browserStatus: r.browser_status || 'STOPPED',
+    backendState: r.backend_state,
     betCycleEnabled: r.bet_cycle_enabled ?? true,
     pricingSource: r.pricing_source || 'GLOBAL',
     riskSource: r.risk_source || 'GLOBAL',
     rebetSource: r.rebet_source || 'GLOBAL',
     customPricing: r.custom_pricing,
     customRisk: r.custom_risk,
-    customRebet: r.custom_rebet,
-    canActivate: r.backend_state !== 'ACTIVE',
-    canDeactivate: r.backend_state === 'ACTIVE',
-    canToggleBetCycle: true
+    customRebet: r.custom_rebet
   }));
 
-  const activeBrowsers = accounts.filter(a => a.browserStatus === 'ACTIVE' || a.browserStatus === 'LAUNCHING').length;
-  const lifecycle = globalConfigRow.lifecycle || 'STOPPED';
-
   return {
-    lifecycle,
-    lifecycleMessage: globalConfigRow.lifecycle_message || (lifecycle === 'RUNNING' ? 'Engine operational' : 'Engine stopped'),
-    capabilities: {
-      canStartAutomation: lifecycle === 'STOPPED',
-      canStopAutomation: lifecycle === 'RUNNING' || lifecycle === 'STARTING',
-      canPlaceBet: lifecycle === 'RUNNING',
-      canCashOut: lifecycle === 'RUNNING',
-      canValidate: true,
-      canActivateAccount: true,
-      canDeactivateAccount: true,
-      canIncreaseBrowserCount: activeBrowsers < maxBrowsers,
-      canDecreaseBrowserCount: activeBrowsers > 0,
-      canToggleBetCycle: true,
-      canEditPricing: true,
-      canEditRisk: true,
-      canEditRebet: true,
-      canEditProxy: true,
-      canEditExecution: true
-    },
     globalConfig: {
       pricing: globalConfigRow.pricing || {},
       risk: globalConfigRow.risk || {},
@@ -88,58 +62,11 @@ export async function getAutomationSnapshot(accountId) {
       advancedRuntime: globalConfigRow.advanced_runtime || {}
     },
     accounts,
-    systemStatus: {
-      acpConnected: true,
-      engineStatus: lifecycle === 'RUNNING' ? 'RUNNING' : (lifecycle === 'STOPPED' ? 'READY' : 'RUNNING'),
-      backendConnected: true,
-      activeBrowsers,
-      totalConfiguredCapacity: maxBrowsers
+    serverLimits: {
+      maxConcurrentBrowsers: maxBrowsers,
+      allowedPlatforms: license?.limits?.allowedPlatforms || []
     }
   };
-}
-
-/**
- * Start the automation engine.
- * @param {string} accountId 
- * @returns {Promise<Object>}
- */
-export async function startAutomation(accountId) {
-  const pool = getPool();
-  await pool.query(`
-    UPDATE global_automation_configs 
-    SET lifecycle = 'RUNNING', lifecycle_message = 'Engine started by operator', updated_at = now()
-    WHERE id = 'primary'
-  `);
-
-  await pool.query(`
-    UPDATE automation_account_configs
-    SET browser_status = 'ACTIVE', account_status = 'IN_USE', updated_at = now()
-    WHERE account_id IN (SELECT id FROM betting_accounts WHERE account_id = $1 AND backend_state = 'ACTIVE')
-  `, [accountId]);
-
-  return { success: true, lifecycle: 'RUNNING' };
-}
-
-/**
- * Stop the automation engine.
- * @param {string} accountId 
- * @returns {Promise<Object>}
- */
-export async function stopAutomation(accountId) {
-  const pool = getPool();
-  await pool.query(`
-    UPDATE global_automation_configs 
-    SET lifecycle = 'STOPPED', lifecycle_message = 'Engine stopped by operator', updated_at = now()
-    WHERE id = 'primary'
-  `);
-
-  await pool.query(`
-    UPDATE automation_account_configs
-    SET browser_status = 'STOPPED', account_status = 'IDLE', updated_at = now()
-    WHERE account_id IN (SELECT id FROM betting_accounts WHERE account_id = $1)
-  `, [accountId]);
-
-  return { success: true, lifecycle: 'STOPPED' };
 }
 
 /**
@@ -229,37 +156,4 @@ export async function updateAccountAutomationConfig(accountId, bettingAccountId,
 
   if (res.rows.length === 0) throw new Error('Account not found');
   return { success: true, account: res.rows[0] };
-}
-
-/**
- * Enqueue tactical manual bet.
- * @param {string} accountId 
- * @param {Object} params 
- * @returns {Promise<Object>}
- */
-export async function placeTacticalBet(accountId, params) {
-  const operationId = `op-${crypto.randomUUID()}`;
-  return { operationId, status: 'QUEUED', params };
-}
-
-/**
- * Enqueue immediate cash out.
- * @param {string} accountId 
- * @param {Object} params 
- * @returns {Promise<Object>}
- */
-export async function cashOutTactical(accountId, params) {
-  const operationId = `op-${crypto.randomUUID()}`;
-  return { operationId, status: 'QUEUED', params };
-}
-
-/**
- * Validate credentials & session states across all accounts.
- * @param {string} accountId 
- * @returns {Promise<Object>}
- */
-export async function validateOperations(accountId) {
-  const pool = getPool();
-  const res = await pool.query('SELECT COUNT(*) FROM betting_accounts WHERE account_id = $1 AND backend_state = \'ACTIVE\'', [accountId]);
-  return { status: 'VALID', activeCount: Number(res.rows[0].count) };
 }

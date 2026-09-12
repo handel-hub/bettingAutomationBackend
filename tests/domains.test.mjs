@@ -83,15 +83,17 @@ test('Domains 1-7 API and WebSocket Integration Test Suite', async (t) => {
     assert.strictEqual(actionData.backendState, 'SUSPENDED');
   });
 
-  // 2. Domain 1: Automation Engine & Tactical Operations
+  // 2. Domain 1: Automation Workspace Snapshot & Config
   await t.test('Domain 1: Automation Workspace Snapshot & Config', async () => {
     const snapRes = await fetch(`${BASE_URL}/automation/snapshot`, { headers: authHeaders });
     assert.strictEqual(snapRes.status, 200);
     const snapshot = await snapRes.json();
-    assert.ok(snapshot.lifecycle);
-    assert.ok(snapshot.capabilities);
+    assert.strictEqual(snapshot.lifecycle, undefined, 'Backend snapshot must not contain operational lifecycle');
+    assert.strictEqual(snapshot.capabilities, undefined, 'Backend snapshot must not contain operational capabilities');
     assert.ok(snapshot.globalConfig);
-    assert.ok(snapshot.systemStatus);
+    assert.ok(snapshot.serverLimits);
+    assert.strictEqual(snapshot.systemStatus, undefined, 'Operational systemStatus must not be in backend snapshot');
+    assert.ok(Array.isArray(snapshot.accounts));
 
     // Update global config
     const confRes = await fetch(`${BASE_URL}/automation/config/global/risk`, {
@@ -103,23 +105,19 @@ test('Domains 1-7 API and WebSocket Integration Test Suite', async (t) => {
     const confData = await confRes.json();
     assert.strictEqual(confData.globalConfig.risk.maxStake, 15000);
 
-    // Start lifecycle
+    // Operational lifecycle endpoints removed from Backend (return 404)
     const startRes = await fetch(`${BASE_URL}/automation/lifecycle/start`, {
       method: 'POST',
       headers: authHeaders
     });
-    assert.strictEqual(startRes.status, 200);
-    const startData = await startRes.json();
-    assert.strictEqual(startData.lifecycle, 'RUNNING');
+    assert.strictEqual(startRes.status, 404, 'Tactical lifecycle start endpoint must be removed');
 
     // Stop lifecycle
     const stopRes = await fetch(`${BASE_URL}/automation/lifecycle/stop`, {
       method: 'POST',
       headers: authHeaders
     });
-    assert.strictEqual(stopRes.status, 200);
-    const stopData = await stopRes.json();
-    assert.strictEqual(stopData.lifecycle, 'STOPPED');
+    assert.strictEqual(stopRes.status, 404, 'Tactical lifecycle stop endpoint must be removed');
   });
 
   // 3. Domain 3: Billing & Invoices

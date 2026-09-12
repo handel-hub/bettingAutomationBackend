@@ -27,12 +27,12 @@ export async function validateEnvelope(raw, machinePublicKeyHex) {
     return { valid: false, error: 'MISSING_REQUIRED_FIELDS' };
   }
   
-  // Verify timestamp freshness: must be within 60s
+  // Verify timestamp freshness: must be within 30s (±30,000ms)
   if (!timestamp) {
     return { valid: false, error: 'NONCE_EXPIRED' };
   }
   const ts = typeof timestamp === 'number' ? timestamp : new Date(timestamp).getTime();
-  if (isNaN(ts) || Math.abs(Date.now() - ts) > 60000) {
+  if (isNaN(ts) || Math.abs(Date.now() - ts) > 30000) {
     return { valid: false, error: 'NONCE_EXPIRED' };
   }
 
