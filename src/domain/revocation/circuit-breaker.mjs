@@ -8,12 +8,12 @@ const CIRCUIT_BREAKER_THRESHOLD = 10;
  * @param {import('pg').PoolClient} [autonomousClient] 
  * @returns {Promise<boolean>} true if tripped, false if safe
  */
-export async function checkCircuitBreaker(autonomousClient = null) {
+export async function checkCircuitBreaker() {
   const pool = getPool();
-  const client = autonomousClient || await pool.connect();
-  const shouldRelease = !autonomousClient;
+  const client = await pool.connect();
 
   try {
+    await client.query('BEGIN');
     // Use upsert to increment the current minute's counter
     const res = await client.query(`
       INSERT INTO revocation_circuit_breaker (window_start, revocation_count, tripped)
@@ -27,6 +27,7 @@ export async function checkCircuitBreaker(autonomousClient = null) {
     
     // If previously tripped and not overridden, it stays tripped
     if (record.tripped && !record.overridden_by) {
+      await client.query('COMMIT');
       return true;
     }
     
@@ -47,14 +48,19 @@ export async function checkCircuitBreaker(autonomousClient = null) {
         reason: 'threshold_exceeded'
       });
       
+      await client.query('COMMIT');
       return true;
     }
     
+    await client.query('COMMIT');
     return false;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
+    throw err;
   } finally {
-    if (shouldRelease) {
-      client.release();
-    }
+    client.release();
   }
 }
 

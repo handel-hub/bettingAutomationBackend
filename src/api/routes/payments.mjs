@@ -79,13 +79,15 @@ router.post('/webhook', async (req, res, next) => {
 
     let accountId = req.body.data?.meta?.account_id || req.body.data?.metadata?.account_id || req.body.account_id;
     const txRef = req.body.data?.tx_ref || req.body.data?.reference;
-    const isFlw = Boolean(
+    const hasFlwHeader = Boolean(
       req.headers['verif-hash'] ||
       req.headers['verif_hash'] ||
       req.headers['flutterwave-signature'] ||
-      req.body.data?.flw_ref ||
-      req.body.data?.tx_ref
+      req.headers['x-flutterwave-signature']
     );
+    const hasPaystackHeader = Boolean(req.headers['x-paystack-signature']);
+    const isFlw = hasFlwHeader || (Boolean(req.body.data?.flw_ref) && !hasPaystackHeader);
+    const providerName = isFlw ? 'flutterwave' : 'paystack';
 
     // If accountId is not directly in webhook payload, verify transaction with Flutterwave API to fetch full metadata
     if (!accountId && isFlw && req.body.data?.id && typeof provider.verifyTransaction === 'function') {
@@ -123,9 +125,9 @@ router.post('/webhook', async (req, res, next) => {
     }
     
     const idempotencyKey = req.headers['idempotency-key']?.toString() || txRef || providerEventId;
-    const providerName = isFlw ? 'flutterwave' : 'paystack';
+    const webhookPayload = { ...req.body, _provider: providerName };
 
-    await handleWebhook(providerName, providerEventId, eventType, accountId, idempotencyKey, req.body);
+    await handleWebhook(providerName, providerEventId, eventType, accountId, idempotencyKey, webhookPayload);
     
     // Return 200 immediately, async worker handles the rest
     res.status(200).send('OK');

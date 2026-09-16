@@ -101,10 +101,19 @@ export async function envelopeValidator(req, res, next) {
       );
       if (sessRes.rows.length > 0) {
         req.accountId = sessRes.rows[0].account_id;
+      } else {
+        const err = new Error('SESSION_REVOKED');
+        // @ts-ignore
+        err.status = 401;
+        // @ts-ignore
+        err.code = 'BE_AUTH_SESSION_EXPIRED';
+        // @ts-ignore
+        err.legacyCode = 'SESSION_REVOKED';
+        throw err;
       }
     }
 
-    // Monotonic generation validation if generation is tracked
+    // Monotonic generation validation if generation is tracked (INV-06: reject counter divergence)
     if (envelope.sessionId && req.accountId && typeof envelope.clientGeneration === 'number') {
       const stateRes = await pool.query(
         "SELECT session_generation, machine_generation FROM machine_session_states WHERE account_id = $1 AND machine_id = $2",
@@ -112,7 +121,7 @@ export async function envelopeValidator(req, res, next) {
       );
       if (stateRes.rows.length > 0) {
         const curGen = Number(stateRes.rows[0].session_generation);
-        if (envelope.clientGeneration < curGen) {
+        if (envelope.clientGeneration !== curGen) {
           const genErr = new Error('GENERATION_MISMATCH');
           // @ts-ignore
           genErr.status = 409;

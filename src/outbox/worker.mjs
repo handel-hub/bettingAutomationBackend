@@ -81,7 +81,9 @@ export async function processOutboxEvent(event) {
     } else if (event.event_type.startsWith('PAYMENT_') || event.event_type.startsWith('charge.')) {
       const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
       
-      const isFlw = Boolean(payload.data?.flw_ref || payload.data?.tx_ref || payload.data?.meta);
+      const isExplicitPaystack = payload._provider === 'paystack' || payload.provider === 'paystack';
+      const isExplicitFlw = payload._provider === 'flutterwave' || payload.provider === 'flutterwave';
+      const isFlw = isExplicitFlw || (!isExplicitPaystack && Boolean(payload.data?.flw_ref || (!payload.data?.channel && !payload.data?.authorization && payload.data?.charged_amount)));
       const isFlwSuccess = (event.event_type === 'charge.completed' || event.event_type === 'PAYMENT_SUCCESS') && (payload.data?.status === 'successful' || !payload.data?.status);
       const isPaystackSuccess = event.event_type === 'charge.success' || event.event_type === 'PAYMENT_SUCCESS';
 
@@ -144,7 +146,7 @@ export async function processOutboxEvent(event) {
             majorAmount = Number(payload.data?.charged_amount || payload.data?.amount || 10000);
           } else {
             const rawAmount = payload.data?.amount || 1000000;
-            majorAmount = (typeof rawAmount === 'number' && rawAmount > 1000) ? (rawAmount / 100) : rawAmount;
+            majorAmount = (typeof rawAmount === 'number' && rawAmount >= 100) ? (rawAmount / 100) : rawAmount;
           }
           const invId = `inv-${ref}`;
           const taxRate = 0.075;
@@ -214,17 +216,38 @@ export async function processOutboxEvent(event) {
 
 export async function startWorker() {
   console.log(`Starting Outbox Worker ${WORKER_ID}`);
-  
-  setInterval(async () => {
+  let isRunning = false;
+
+  const runDrainCycle = async () => {
+    if (isRunning) return;
+    isRunning = true;
     try {
-      const event = await claimNextEvent();
-      if (event) {
+      let drained = 0;
+      while (drained < 10) {
+        const event = await claimNextEvent();
+        if (!event) break;
+        drained++;
         console.log(`Processing outbox event: ${event.event_id}`);
-        const success = await processOutboxEvent(event);
-        await completeEvent(event.event_id, success);
+        let success = false;
+        try {
+          success = await processOutboxEvent(event);
+        } catch (procErr) {
+          console.error(`Error processing outbox event ${event.event_id}:`, procErr);
+          success = false;
+        } finally {
+          try {
+            await completeEvent(event.event_id, success);
+          } catch (completeErr) {
+            console.error(`Failed to complete outbox event ${event.event_id}:`, completeErr);
+          }
+        }
       }
     } catch (err) {
-      console.error('Outbox worker error:', err);
+      console.error('Outbox worker loop error:', err);
+    } finally {
+      isRunning = false;
     }
-  }, 5000); // Poll every 5s
+  };
+
+  return setInterval(runDrainCycle, 5000); // Poll every 5s
 }

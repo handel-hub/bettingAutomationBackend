@@ -218,8 +218,8 @@ test('Audit Remediation Verification Suite (12 Core Scenarios)', async (t) => {
     assert.strictEqual(verifiedAdmin.role, 'SUPER_ADMIN');
   });
 
-  // Scenario 5: File Transfer Service End-to-End Test
-  await t.test('5. File Transfer Service: Initialize and Status Contract', async () => {
+  // Scenario 5: File Transfer Service Quarantine Test
+  await t.test('5. File Transfer Service: Quarantine & 404 Endpoint Verification', async () => {
     const initRes = await fetch(`${BASE_URL}/transfers`, {
       method: 'POST',
       headers: {
@@ -228,25 +228,15 @@ test('Audit Remediation Verification Suite (12 Core Scenarios)', async (t) => {
       },
       body: JSON.stringify({
         fileId: 'engine_binary.zip',
-        totalSize: 1048576,
-        totalChunks: 2,
-        chunkSize: 524288,
-        contentHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+        totalSize: 1048576
       })
     });
-    assert.strictEqual(initRes.status, 200, 'Transfer init must succeed');
-    const initData = await initRes.json();
-    assert.ok(initData.remoteSessionId, 'Must return remoteSessionId');
-    assert.ok(initData.transferId, 'Must return transferId');
+    assert.strictEqual(initRes.status, 404, 'Quarantined /transfers endpoint must return 404');
 
-    // Check status
-    const statusRes = await fetch(`${BASE_URL}/transfers/${initData.remoteSessionId}/status`, {
+    const statusRes = await fetch(`${BASE_URL}/transfers/non-existent-session/status`, {
       headers: { 'Authorization': `Bearer ${testSessionId}` }
     });
-    assert.strictEqual(statusRes.status, 200);
-    const statusData = await statusRes.json();
-    assert.strictEqual(statusData.status, 'INITIALIZING');
-    assert.strictEqual(statusData.fileId, 'engine_binary.zip');
+    assert.strictEqual(statusRes.status, 404, 'Quarantined status endpoint must return 404');
   });
 
   // Scenario 6: Automation Config PUT Endpoint Test
@@ -357,20 +347,29 @@ test('Audit Remediation Verification Suite (12 Core Scenarios)', async (t) => {
 
   // Scenario 10: Circuit Breaker Durability Test
   await t.test('10. Circuit Breaker Durability Across Aborted Transactions', async () => {
-    // Record revocations up to threshold
+    // Reset circuit breaker state for clean test
+    await pool.query('DELETE FROM revocation_circuit_breaker');
+
+    // Execute within an explicit transaction that gets ROLLED BACK
     const client = await pool.connect();
     try {
+      await client.query('BEGIN');
       for (let i = 0; i < 12; i++) {
         await recordRevocation(client);
       }
+      // Explicitly ROLL BACK the caller transaction
+      await client.query('ROLLBACK');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
 
-    // Check circuit breaker status
+    // Check circuit breaker status: autonomous connection must have committed its increments
     const cbStatus = await isCircuitBreakerTripped(pool);
-    assert.strictEqual(cbStatus.tripped, true, 'Circuit breaker must trip after exceeding threshold');
-    assert.ok(cbStatus.count >= 10, 'Count must exceed threshold');
+    assert.strictEqual(cbStatus.tripped, true, 'Circuit breaker must trip and persist even when caller transaction ROLLS BACK');
+    assert.ok(cbStatus.count >= 10, 'Revocation count must be preserved across caller rollback');
   });
 
   // Scenario 11: Raw Body Webhook HMAC Verification

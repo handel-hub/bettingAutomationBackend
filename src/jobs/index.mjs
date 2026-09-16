@@ -12,7 +12,7 @@ export function initializeJobs() {
   registerJob('nonce-purge', 60 * 1000, purgeNonces); // every 1 min
   registerJob('session-cleanup', 5 * 60 * 1000, cleanupSessions); // every 5 mins
   registerJob('subscription-scheduler', 60 * 60 * 1000, scheduleSubscriptions); // every 1 hour
-  registerJob('transfer-cleanup', 60 * 60 * 1000, cleanupStaleTransfers); // every 1 hour
+  // FTS Quarantined: registerJob('transfer-cleanup', 60 * 60 * 1000, cleanupStaleTransfers);
   registerJob('audit-verification', 15 * 60 * 1000, verifyAuditChain); // every 15 mins
   registerJob('license-sync', 60 * 60 * 1000, syncLicenses); // every 1 hour
   

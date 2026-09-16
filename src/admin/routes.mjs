@@ -43,7 +43,8 @@ router.get('/overview', requireAdmin('SUPPORT'), (req, res) => {
 
 router.post('/accounts/:id/suspend', requireAdmin('SUPER_ADMIN'), async (req, res, next) => {
   try {
-    await revoke('ACCOUNT', req.params.id, 'admin_suspension');
+    // @ts-ignore
+    await revoke('ACCOUNT', req.params.id, 'admin_suspension', { type: 'ADMIN', id: req.admin.adminId });
     res.json({ success: true });
   } catch (err) {
     next(err);
@@ -52,7 +53,8 @@ router.post('/accounts/:id/suspend', requireAdmin('SUPER_ADMIN'), async (req, re
 
 router.post('/machines/:id/revoke', requireAdmin('SUPPORT'), async (req, res, next) => {
   try {
-    await revoke('MACHINE', req.params.id, 'admin_revocation');
+    // @ts-ignore
+    await revoke('MACHINE', req.params.id, 'admin_revocation', { type: 'ADMIN', id: req.admin.adminId });
     res.json({ success: true });
   } catch (err) {
     next(err);
@@ -61,7 +63,8 @@ router.post('/machines/:id/revoke', requireAdmin('SUPPORT'), async (req, res, ne
 
 router.post('/sessions/:id/invalidate', requireAdmin('SUPPORT'), async (req, res, next) => {
   try {
-    await revoke('SESSION', req.params.id, 'admin_invalidation');
+    // @ts-ignore
+    await revoke('SESSION', req.params.id, 'admin_invalidation', { type: 'ADMIN', id: req.admin.adminId });
     res.json({ success: true });
   } catch (err) {
     next(err);
@@ -70,7 +73,8 @@ router.post('/sessions/:id/invalidate', requireAdmin('SUPPORT'), async (req, res
 
 router.post('/licenses/:id/revoke', requireAdmin('LICENSE_ADMIN'), async (req, res, next) => {
   try {
-    await revoke('LICENSE', req.params.id, 'admin_license_revocation');
+    // @ts-ignore
+    await revoke('LICENSE', req.params.id, 'admin_license_revocation', { type: 'ADMIN', id: req.admin.adminId });
     res.json({ success: true });
   } catch (err) {
     next(err);

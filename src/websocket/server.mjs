@@ -141,8 +141,9 @@ export function emitServerEvent(accountId, eventType, payload) {
   const rawMessage = JSON.stringify(eventEnvelope);
   for (const client of wssInstance.clients) {
     if (client.readyState === WebSocket.OPEN) {
+      // Strictly check client.accountId to prevent leakage to unauthenticated pending sockets
       // @ts-ignore
-      if (!client.accountId || client.accountId === accountId) {
+      if (client.accountId && client.accountId === accountId) {
         client.send(rawMessage);
       }
     }

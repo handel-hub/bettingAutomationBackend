@@ -1,6 +1,12 @@
 // @ts-check
-import { getPool } from '../../persistence/connection.mjs';
 import { withTransaction } from '../../persistence/transaction.mjs';
+import {
+  findByInstallationAndPublicKey,
+  findClones,
+  countActiveByAccount,
+  createMachine,
+  createSessionState
+} from './repository.mjs';
 
 /**
  * Register a new machine
@@ -33,20 +39,14 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
     }
     
     // 2. Check for duplicate installationId / publicKeyHex (idempotent registration)
-    const existingRes = await client.query(
-      'SELECT * FROM machines WHERE installation_id = $1 AND public_key_hex = $2',
-      [installationId, publicKeyHex]
-    );
-    if (existingRes.rows.length > 0) {
-      return existingRes.rows[0];
+    const existing = await findByInstallationAndPublicKey(client, installationId, publicKeyHex);
+    if (existing) {
+      return existing;
     }
     
     // 3. Clone detection (same installation_id, different public_key)
-    const cloneRes = await client.query(
-      'SELECT machine_id FROM machines WHERE installation_id = $1 AND public_key_hex != $2',
-      [installationId, publicKeyHex]
-    );
-    if (cloneRes.rows.length > 0) {
+    const clones = await findClones(client, installationId, publicKeyHex);
+    if (clones.length > 0) {
       const err = new Error('CLONE_SUSPECTED');
       // @ts-ignore
       err.code = 'CLONE_SUSPECTED';
@@ -92,11 +92,7 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
       );
       const maxMachines = licenseRes.rows[0]?.limits?.max_machines || 5;
       
-      const countRes = await client.query(
-        "SELECT COUNT(*) FROM machines WHERE account_id = $1 AND status != 'REVOKED'",
-        [accountId]
-      );
-      const activeMachineCount = Number(countRes.rows[0]?.count || 0);
+      const activeMachineCount = await countActiveByAccount(client, accountId);
       if (activeMachineCount >= maxMachines) {
         const err = new Error(`SEAT_LIMIT_EXCEEDED: Maximum ${maxMachines} active machines allowed`);
         // @ts-ignore
@@ -106,21 +102,16 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
     }
     
     // 6. Insert machine
-    const insertRes = await client.query(`
-      INSERT INTO machines (installation_id, account_id, public_key_hex, descriptor, status, machine_generation)
-      VALUES ($1, $2, $3, $4, 'REGISTERED', 1)
-      RETURNING *
-    `, [installationId, accountId, publicKeyHex, JSON.stringify(descriptor || {})]);
-    
-    const newMachine = insertRes.rows[0];
+    const newMachine = await createMachine(client, {
+      installationId,
+      accountId,
+      publicKeyHex,
+      descriptor
+    });
     
     // Insert initial generation state if account is bound
     if (accountId) {
-      await client.query(`
-        INSERT INTO machine_session_states (account_id, machine_id, session_generation, authorization_revision, machine_generation)
-        VALUES ($1, $2, 1, 1, 1)
-        ON CONFLICT (account_id, machine_id) DO NOTHING
-      `, [accountId, newMachine.machine_id]);
+      await createSessionState(client, accountId, newMachine.machine_id);
     }
     
     return newMachine;

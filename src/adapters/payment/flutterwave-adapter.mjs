@@ -52,13 +52,14 @@ export class FlutterwaveAdapter {
     let amount = 10000; // Default ₦10,000 in major units (NGN)
 
     try {
-      const { getPool } = await import('../../persistence/connection.mjs');
-      const pool = getPool();
-      const accRes = await pool.query('SELECT email FROM accounts WHERE account_id = $1', [accountId]);
-      if (accRes.rows.length > 0 && accRes.rows[0].email) {
-        email = accRes.rows[0].email;
+      const { findById } = await import('../../domain/account/repository.mjs');
+      const acc = await findById(undefined, accountId);
+      if (acc?.email) {
+        email = acc.email;
       }
 
+      const { getPool } = await import('../../persistence/connection.mjs');
+      const pool = getPool();
       const planRes = await pool.query('SELECT monthly_price, annual_price FROM subscription_plans WHERE LOWER(plan_id) = LOWER($1)', [planId]);
       if (planRes.rows.length > 0) {
         amount = billingInterval === 'annual' ? Number(planRes.rows[0].annual_price) : Number(planRes.rows[0].monthly_price);

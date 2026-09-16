@@ -24,12 +24,14 @@ export function startScheduler() {
       const lockKey = job.name.split('').reduce((a,b)=>{a=((a<<5)-a)+b.charCodeAt(0);return a&a},0);
       
       const client = await pool.connect();
+      let hasLock = false;
       try {
         const lockRes = await client.query('SELECT pg_try_advisory_lock($1) as locked', [lockKey]);
-        if (!lockRes.rows[0].locked) {
+        if (!lockRes.rows[0]?.locked) {
           // Another instance is running this job
           return;
         }
+        hasLock = true;
         
         // 2. Check last run
         const runRes = await client.query(`
@@ -43,7 +45,6 @@ export function startScheduler() {
         
         if (runRes.rows.length === 0) {
           // Ran recently / locked
-          await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
           return;
         }
         
@@ -54,11 +55,16 @@ export function startScheduler() {
         } catch (err) {
           console.error(`Job ${job.name} failed:`, err);
         }
-        
-        await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
       } catch (err) {
         console.error(`Error in scheduler for ${job.name}:`, err);
       } finally {
+        if (hasLock) {
+          try {
+            await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
+          } catch (unlockErr) {
+            console.error(`Failed to release advisory lock for ${job.name}:`, unlockErr);
+          }
+        }
         client.release();
       }
     }, job.intervalMs);

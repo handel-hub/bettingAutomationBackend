@@ -1,5 +1,12 @@
 // @ts-check
-import { getPool } from '../../persistence/connection.mjs';
+import {
+  findSubscriptionByAccount,
+  findInvoicesByAccount,
+  findLatestPaymentAuth,
+  cancelSubscriptionInDb,
+  resumeSubscriptionInDb,
+  upsertInvoice
+} from './repository.mjs';
 
 /**
  * Fetch BillingSnapshot for the operator.
@@ -8,38 +15,18 @@ import { getPool } from '../../persistence/connection.mjs';
  * @returns {Promise<Object>}
  */
 export async function getBillingSnapshot(accountId) {
-  const pool = getPool();
-
   // 1. Fetch Subscription, Entitlements & Subscription Plan catalog metadata
-  const subRes = await pool.query(`
-    SELECT s.subscription_id, s.provider_subscription_id, s.plan_id, s.status,
-           s.current_period_start, s.current_period_end, s.cancelled_at,
-           pe.limits,
-           sp.name as sp_name, sp.tagline, sp.description, sp.monthly_price, sp.annual_price,
-           sp.features as sp_features
-    FROM subscriptions s
-    LEFT JOIN plan_entitlements pe ON s.plan_id = pe.plan_id
-    LEFT JOIN subscription_plans sp ON LOWER(s.plan_id) = LOWER(sp.plan_id)
-    WHERE s.account_id = $1
-    ORDER BY s.created_at DESC LIMIT 1
-  `, [accountId]);
+  const sub = await findSubscriptionByAccount(undefined, accountId);
 
-  const sub = subRes.rows[0];
   const planPrice = sub?.monthly_price ? Number(sub.monthly_price) : (sub?.limits?.price || 10000);
   const billingInterval = sub?.limits?.interval || 'Monthly';
   const planName = sub?.sp_name || (sub?.plan_id ? (sub.plan_id.charAt(0).toUpperCase() + sub.plan_id.slice(1).toLowerCase()) : 'Pro');
   const currentPlanId = sub?.plan_id ? sub.plan_id.toLowerCase() : 'pro';
 
   // 2. Fetch Invoices with statutory tax and fiscal breakdown
-  const invRes = await pool.query(`
-    SELECT id, reference, amount, currency, status, paid_at, receipt_url, created_at,
-           subtotal, tax_amount, tax_rate, plan_name, billing_interval, currency_symbol
-    FROM invoices
-    WHERE account_id = $1
-    ORDER BY created_at DESC LIMIT 20
-  `, [accountId]);
+  const invRows = await findInvoicesByAccount(undefined, accountId, 20);
 
-  const invoices = invRes.rows.map(r => {
+  const invoices = invRows.map(r => {
     const gross = Number(r.amount);
     const taxRate = r.tax_rate !== null && r.tax_rate !== undefined ? Number(r.tax_rate) : 0.075;
     const subtotal = r.subtotal !== null && r.subtotal !== undefined ? Number(r.subtotal) : Math.round((gross / (1 + taxRate)) * 100) / 100;
@@ -62,16 +49,11 @@ export async function getBillingSnapshot(accountId) {
   });
 
   // 3. Fetch latest payment event to infer card info if available
-  const payEventRes = await pool.query(`
-    SELECT payload FROM outbox_events
-    WHERE event_type = 'charge.success'
-      AND (payload->'data'->'metadata'->>'account_id' = $1 OR payload->>'account_id' = $1)
-    ORDER BY created_at DESC LIMIT 1
-  `, [accountId]);
+  const latestPayEvent = await findLatestPaymentAuth(undefined, accountId);
 
   let paymentMethod = null;
-  if (payEventRes.rows.length > 0) {
-    const authData = payEventRes.rows[0].payload?.data?.authorization;
+  if (latestPayEvent) {
+    const authData = latestPayEvent.payload?.data?.authorization;
     if (authData) {
       paymentMethod = {
         cardBrand: authData.brand || authData.card_type || 'Mastercard',
@@ -126,17 +108,11 @@ export async function getBillingSnapshot(accountId) {
  * @returns {Promise<Object>}
  */
 export async function cancelSubscription(accountId) {
-  const pool = getPool();
-  const res = await pool.query(`
-    UPDATE subscriptions
-    SET status = 'CANCELLED', cancelled_at = now(), updated_at = now()
-    WHERE account_id = $1 AND status = 'ACTIVE'
-    RETURNING current_period_end
-  `, [accountId]);
+  const row = await cancelSubscriptionInDb(undefined, accountId);
 
   return {
     status: 'Cancelled',
-    expirationDate: res.rows[0]?.current_period_end || new Date(Date.now() + 30 * 86400000).toISOString()
+    expirationDate: row?.current_period_end || new Date(Date.now() + 30 * 86400000).toISOString()
   };
 }
 
@@ -146,17 +122,11 @@ export async function cancelSubscription(accountId) {
  * @returns {Promise<Object>}
  */
 export async function resumeSubscription(accountId) {
-  const pool = getPool();
-  const res = await pool.query(`
-    UPDATE subscriptions
-    SET status = 'ACTIVE', cancelled_at = null, updated_at = now()
-    WHERE account_id = $1 AND status = 'CANCELLED'
-    RETURNING current_period_end
-  `, [accountId]);
+  const row = await resumeSubscriptionInDb(undefined, accountId);
 
   return {
     status: 'Active',
-    renewalDate: res.rows[0]?.current_period_end || new Date(Date.now() + 30 * 86400000).toISOString()
+    renewalDate: row?.current_period_end || new Date(Date.now() + 30 * 86400000).toISOString()
   };
 }
 
@@ -167,49 +137,5 @@ export async function resumeSubscription(accountId) {
  * @returns {Promise<Object>}
  */
 export async function createInvoice(accountId, invoiceData) {
-  const pool = getPool();
-  const {
-    id,
-    reference,
-    amount,
-    currency = 'NGN',
-    status = 'Paid',
-    paidAt,
-    receiptUrl,
-    subtotal,
-    taxAmount,
-    taxRate = 0.075,
-    planName,
-    billingInterval,
-    currencySymbol = '₦'
-  } = invoiceData;
-
-  const gross = Number(amount);
-  const rate = Number(taxRate);
-  const calcSubtotal = subtotal !== undefined ? Number(subtotal) : Math.round((gross / (1 + rate)) * 100) / 100;
-  const calcTax = taxAmount !== undefined ? Number(taxAmount) : Math.round((gross - calcSubtotal) * 100) / 100;
-
-  const res = await pool.query(`
-    INSERT INTO invoices (
-      id, account_id, reference, amount, currency, status, paid_at, receipt_url,
-      subtotal, tax_amount, tax_rate, plan_name, billing_interval, currency_symbol
-    )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-    ON CONFLICT (id) DO UPDATE SET
-      status = EXCLUDED.status,
-      paid_at = EXCLUDED.paid_at,
-      receipt_url = EXCLUDED.receipt_url,
-      subtotal = EXCLUDED.subtotal,
-      tax_amount = EXCLUDED.tax_amount,
-      tax_rate = EXCLUDED.tax_rate,
-      plan_name = EXCLUDED.plan_name,
-      billing_interval = EXCLUDED.billing_interval,
-      currency_symbol = EXCLUDED.currency_symbol
-    RETURNING *
-  `, [
-    id, accountId, reference, gross, currency, status, paidAt || new Date(), receiptUrl || null,
-    calcSubtotal, calcTax, rate, planName || null, billingInterval || null, currencySymbol
-  ]);
-
-  return res.rows[0];
+  return upsertInvoice(undefined, accountId, invoiceData);
 }

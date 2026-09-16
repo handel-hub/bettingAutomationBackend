@@ -39,15 +39,11 @@ export async function validateEnvelope(raw, machinePublicKeyHex) {
   let pubKeyHex = machinePublicKeyHex;
   let matchedMachine = null;
   if (!pubKeyHex && raw.machineId) {
-    const { getPool } = await import('../persistence/connection.mjs');
-    const pool = getPool();
-    const machineRes = await pool.query(
-      "SELECT machine_id, public_key_hex FROM machines WHERE (machine_id::text = $1 OR installation_id = $1 OR descriptor->>'hardwareId' = $1) AND status != 'REVOKED'",
-      [raw.machineId]
-    );
-    if (machineRes.rows.length > 0) {
-      pubKeyHex = machineRes.rows[0].public_key_hex;
-      matchedMachine = machineRes.rows[0];
+    const { findByIdOrInstallationId } = await import('../domain/machine/repository.mjs');
+    const matched = await findByIdOrInstallationId(undefined, raw.machineId);
+    if (matched && matched.status !== 'REVOKED') {
+      pubKeyHex = matched.public_key_hex;
+      matchedMachine = matched;
     }
   }
 

@@ -59,13 +59,14 @@ export function initializePaymentAdapter(providerOrSecretKey, options = {}) {
         let amount = 1000000; // ₦10,000 in Kobo default
         
         try {
-          const { getPool } = await import('../../persistence/connection.mjs');
-          const pool = getPool();
-          const accRes = await pool.query('SELECT email FROM accounts WHERE account_id = $1', [accountId]);
-          if (accRes.rows.length > 0 && accRes.rows[0].email) {
-            email = accRes.rows[0].email;
+          const { findById } = await import('../../domain/account/repository.mjs');
+          const acc = await findById(undefined, accountId);
+          if (acc?.email) {
+            email = acc.email;
           }
           
+          const { getPool } = await import('../../persistence/connection.mjs');
+          const pool = getPool();
           const planRes = await pool.query('SELECT limits FROM plan_entitlements WHERE plan_id = $1', [planId]);
           if (planRes.rows.length > 0 && planRes.rows[0].limits?.price) {
             amount = Math.round(Number(planRes.rows[0].limits.price) * 100);

@@ -1,8 +1,16 @@
 // @ts-check
-import { getPool } from '../../persistence/connection.mjs';
 import { withTransaction } from '../../persistence/transaction.mjs';
 import { encrypt, decrypt } from '../../crypto/aead.mjs';
 import crypto from 'crypto';
+import {
+  insertAccount,
+  findAccountsByAccount,
+  countAccountsByAccount,
+  findAccountById,
+  deleteAccount,
+  updateAccountState,
+  getCredentialsForDecryption
+} from './repository.mjs';
 
 /**
  * Master key for AEAD AES-256-GCM encryption of stored betting passwords.
@@ -116,31 +124,16 @@ export async function createBettingAccount(accountId, data) {
   const { nonce, ciphertext, tag } = encrypt(getMasterVaultKey(), Buffer.from(accountPassword, 'utf8'), aad);
 
   return withTransaction('READ COMMITTED', async (client) => {
-    const insertRes = await client.query(`
-      INSERT INTO betting_accounts (
-        account_id, name, platform_display_name, account_username,
-        account_password_encrypted, password_iv, password_tag, tags
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING *
-    `, [
+    const acc = await insertAccount(client, {
       accountId,
-      name || `${platformDisplayName} - ${accountUsername}`,
+      name: name || `${platformDisplayName} - ${accountUsername}`,
       platformDisplayName,
       accountUsername,
       ciphertext,
       nonce,
       tag,
-      JSON.stringify(tags)
-    ]);
-
-    const acc = insertRes.rows[0];
-
-    // Create default automation account config
-    await client.query(`
-      INSERT INTO automation_account_configs (account_id)
-      VALUES ($1)
-      ON CONFLICT (account_id) DO NOTHING
-    `, [acc.id]);
+      tags
+    });
 
     return {
       id: acc.id,
@@ -173,32 +166,10 @@ export async function createBettingAccount(accountId, data) {
  * @returns {Promise<Object>}
  */
 export async function listBettingAccounts(accountId, options = {}) {
-  const pool = getPool();
-  const offset = Number(options.offset) || 0;
-  const limit = Math.min(Number(options.limit) || 50, 100);
+  const rows = await findAccountsByAccount(undefined, accountId, options);
+  const totalCount = await countAccountsByAccount(undefined, accountId);
 
-  let query = `
-    SELECT ba.*, aac.bet_cycle_enabled, aac.browser_status, aac.account_status,
-           aac.pricing_source, aac.risk_source, aac.rebet_source
-    FROM betting_accounts ba
-    LEFT JOIN automation_account_configs aac ON ba.id = aac.account_id
-    WHERE ba.account_id = $1
-  `;
-  const params = [accountId];
-
-  if (options.filterQuery) {
-    params.push(`%${options.filterQuery.toLowerCase()}%`);
-    query += ` AND (lower(ba.name) LIKE $${params.length} OR lower(ba.account_username) LIKE $${params.length})`;
-  }
-
-  query += ` ORDER BY ba.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
-  params.push(limit, offset);
-
-  const res = await pool.query(query, params);
-  const countRes = await pool.query('SELECT COUNT(*) FROM betting_accounts WHERE account_id = $1', [accountId]);
-  const totalCount = Number(countRes.rows[0].count);
-
-  const viewportAccounts = res.rows.map((acc) => ({
+  const viewportAccounts = rows.map((acc) => ({
     id: acc.id,
     name: acc.name,
     platformDisplayName: acc.platform_display_name,
@@ -241,21 +212,11 @@ export async function listBettingAccounts(accountId, options = {}) {
  * @returns {Promise<Object>}
  */
 export async function getBettingAccount(accountId, id) {
-  const pool = getPool();
-  const res = await pool.query(`
-    SELECT ba.*, aac.bet_cycle_enabled, aac.browser_status, aac.account_status,
-           aac.pricing_source, aac.risk_source, aac.rebet_source,
-           aac.custom_pricing, aac.custom_risk, aac.custom_rebet
-    FROM betting_accounts ba
-    LEFT JOIN automation_account_configs aac ON ba.id = aac.account_id
-    WHERE ba.id = $1 AND ba.account_id = $2
-  `, [id, accountId]);
+  const acc = await findAccountById(undefined, accountId, id);
 
-  if (res.rows.length === 0) {
+  if (!acc) {
     throw new Error('Betting account not found');
   }
-
-  const acc = res.rows[0];
   return {
     id: acc.id,
     name: acc.name,
@@ -299,11 +260,9 @@ export async function getBettingAccount(accountId, id) {
  * @returns {Promise<Object>}
  */
 export async function executeAccountAction(accountId, id, actionType) {
-  const pool = getPool();
-
   if (actionType === 'DELETE_ACCOUNT' || actionType === 'DELETE') {
-    const res = await pool.query('DELETE FROM betting_accounts WHERE id = $1 AND account_id = $2 RETURNING id', [id, accountId]);
-    if (res.rows.length === 0) throw new Error('Account not found');
+    const res = await deleteAccount(undefined, accountId, id);
+    if (!res) throw new Error('Account not found');
     return { success: true, accountId: id, action: 'DELETED' };
   }
 
@@ -325,14 +284,8 @@ export async function executeAccountAction(accountId, id, actionType) {
     description = 'Operating normally';
   }
 
-  const res = await pool.query(`
-    UPDATE betting_accounts
-    SET backend_state = $1, presentation_category = $2, status_description = $3, updated_at = now()
-    WHERE id = $4 AND account_id = $5
-    RETURNING id, backend_state
-  `, [newState, category, description, id, accountId]);
-
-  if (res.rows.length === 0) throw new Error('Account not found');
+  const res = await updateAccountState(undefined, accountId, id, { newState, category, description });
+  if (!res) throw new Error('Account not found');
 
   return { success: true, accountId: id, backendState: newState };
 }
@@ -349,7 +302,6 @@ export async function executeBulkAction(accountId, actionType, accountIds) {
     throw new Error('accountIds must be a non-empty array');
   }
 
-  const pool = getPool();
   let successful = 0;
   let failed = 0;
   const errors = [];
@@ -387,15 +339,9 @@ export async function executeBulkAction(accountId, actionType, accountIds) {
  * @returns {Promise<string>}
  */
 export async function getDecryptedPassword(accountId, id) {
-  const pool = getPool();
-  const res = await pool.query(`
-    SELECT platform_display_name, account_username, account_password_encrypted, password_iv, password_tag
-    FROM betting_accounts
-    WHERE id = $1 AND account_id = $2
-  `, [id, accountId]);
-
-  if (res.rows.length === 0) throw new Error('Account not found');
-  const { platform_display_name, account_username, account_password_encrypted, password_iv, password_tag } = res.rows[0];
+  const creds = await getCredentialsForDecryption(undefined, accountId, id);
+  if (!creds) throw new Error('Account not found');
+  const { platform_display_name, account_username, account_password_encrypted, password_iv, password_tag } = creds;
 
   const aad = Buffer.from(`${accountId}:${platform_display_name}:${account_username}`);
   const decryptedBuf = decrypt(getMasterVaultKey(), password_iv, account_password_encrypted, password_tag, aad);

@@ -84,14 +84,7 @@ export async function authenticate(email, password, machineId, protocolVersion, 
           throw err;
         }
 
-        // 3. Retire existing active session on this machine
-        const updateOldSessRes = await client.query(`
-          UPDATE sessions SET status = 'REVOKED'
-          WHERE machine_id = $1 AND status = 'AUTHENTICATED'
-          RETURNING session_id
-        `, [actualMachineId]);
-        
-        // 4. Advance generation exactly once
+        // 3. Advance generation exactly once (locks machine_session_states before sessions to prevent deadlock)
         const genRes = await client.query(`
           UPDATE machine_session_states 
           SET session_generation = session_generation + 1
@@ -99,6 +92,13 @@ export async function authenticate(email, password, machineId, protocolVersion, 
           RETURNING session_generation
         `, [actualMachineId, account.account_id]);
         sessionGeneration = genRes.rows[0] ? Number(genRes.rows[0].session_generation) : 2;
+
+        // 4. Retire existing active session on this machine
+        const updateOldSessRes = await client.query(`
+          UPDATE sessions SET status = 'REVOKED'
+          WHERE machine_id = $1 AND status = 'AUTHENTICATED'
+          RETURNING session_id
+        `, [actualMachineId]);
         
         // 5. Create new session
         const insertSessionRes = await client.query(`
