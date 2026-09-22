@@ -2,9 +2,13 @@
 import { withTransaction } from '../persistence/transaction.mjs';
 import { getAccountByEmailForUpdate, updateAccountLockout } from '../domain/auth/repository.mjs';
 import { verifyCredentials } from '../domain/auth/service.mjs';
+import { verifyPassword } from '../crypto/hashing.mjs';
 import { getActiveLicenseForAuth } from '../domain/licensing/service.mjs';
 import { computeCapabilities } from '../domain/authorization/service.mjs';
 import { logEvent } from '../domain/audit/service.mjs';
+
+// Pre-computed fixed Argon2id hash to ensure constant-time verification when account is not found (defeats timing oracles)
+const DUMMY_ARGON2_HASH = '$argon2id$v=19$m=65536,t=3,p=1$PiOvQnUc2ju2CCzdXcmXDQ$acHHRJ5JhSWC4RAucwevZEeSNSP8Op886Y3b44q6gSM';
 
 /**
  * @param {string} email 
@@ -19,7 +23,22 @@ export async function authenticate(email, password, machineId, protocolVersion, 
     // 1. Lock account and verify credentials
     const account = await getAccountByEmailForUpdate(client, email);
     if (!account) {
-      throw new Error('AUTH_FAILED');
+      // Constant-time execution: run Argon2id against fixed dummy hash so latency matches valid accounts (~75ms)
+      await verifyPassword(password, DUMMY_ARGON2_HASH);
+      await logEvent(client, {
+        eventType: 'LOGIN_FAILURE',
+        severity: 'LOW',
+        actorType: 'ANONYMOUS',
+        result: 'FAILURE',
+        reason: 'unknown_account',
+        metadata: { presentedEmail: email }
+      });
+      const err = new Error('AUTH_FAILED');
+      // @ts-ignore
+      err.status = 401;
+      // @ts-ignore
+      err.code = 'BE_AUTH_INVALID_CREDENTIALS';
+      throw err;
     }
     
     const credResult = await verifyCredentials(account, password);
@@ -35,7 +54,12 @@ export async function authenticate(email, password, machineId, protocolVersion, 
           reason: 'invalid_credentials'
         });
       }
-      throw new Error('AUTH_FAILED');
+      const err = new Error('AUTH_FAILED');
+      // @ts-ignore
+      err.status = 401;
+      // @ts-ignore
+      err.code = 'BE_AUTH_INVALID_CREDENTIALS';
+      throw err;
     }
     
     // Clear lockout on success
@@ -175,7 +199,7 @@ export async function authenticate(email, password, machineId, protocolVersion, 
         id: license.license_id,
         planId: license.plan_id,
         status: license.status || 'VALID',
-        expiresAt: license.expires_at
+        expiresAt: license.expires_at ? new Date(license.expires_at).toISOString() : null
       } : {
         status: 'VALID',
         planId: 'pro'

@@ -87,6 +87,7 @@ app.use(errorHandler);
 
 import { startWorker } from './outbox/worker.mjs';
 import { initializeJobs } from './jobs/index.mjs';
+import { bootstrapDevAccounts } from './persistence/bootstrap.mjs';
 
 const config = loadConfig();
 const port = config.PORT || 3001;
@@ -99,9 +100,14 @@ initWebSocketServer(httpServer);
 
 // Only listen if run directly
 if (process.argv[1] && process.argv[1].endsWith('server.mjs')) {
-  httpServer.listen(port, () => {
+  httpServer.listen(port, async () => {
     console.log(`Backend server listening on port ${port}`);
     
+    // Auto-bootstrap default developer accounts idempotently if running in development mode
+    if (config.NODE_ENV === 'development') {
+      await bootstrapDevAccounts();
+    }
+
     // Start background processes
     startWorker();
     initializeJobs();

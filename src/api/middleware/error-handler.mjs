@@ -38,6 +38,14 @@ const ERROR_TAXONOMY = {
     retryable: false,
     message: 'Invalid email or password'
   },
+  AUTH_FAILED: {
+    status: 401,
+    code: 'BE_AUTH_INVALID_CREDENTIALS',
+    legacyCode: 'AUTH_FAILED',
+    category: 'AUTHENTICATION',
+    retryable: false,
+    message: 'Invalid email or password'
+  },
   SESSION_EXPIRED: {
     status: 401,
     code: 'BE_AUTH_SESSION_EXPIRED',
@@ -178,8 +186,6 @@ const ERROR_TAXONOMY = {
  * @param {import('express').NextFunction} next 
  */
 export async function errorHandler(err, req, res, next) {
-  console.error(err);
-
   const errText = `${err.message || ''} ${err.code || ''}`;
   let matched = null;
 
@@ -209,6 +215,12 @@ export async function errorHandler(err, req, res, next) {
       legacyCode = 'CLONE_SUSPECTED';
       category = 'AUTHENTICATION';
     }
+  }
+
+  // Only dump full stack traces for unexpected internal 500 errors.
+  // 4xx operational errors (e.g. invalid credentials, expired session) should not pollute the console with error traces.
+  if (statusCode >= 500) {
+    console.error(err);
   }
 
   res.status(statusCode);

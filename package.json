@@ -34,6 +34,7 @@
   "scripts": {
     "test": "node --test --test-concurrency=1 tests/**/*.test.mjs",
     "migrate": "node migrations/runner.mjs",
+    "seed": "node scripts/seed.mjs",
     "start": "node src/server.mjs"
   }
 }
