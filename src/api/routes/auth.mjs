@@ -32,11 +32,15 @@ router.post('/init', async (req, res, next) => {
     const generationNum = Number(authResult.sessionGeneration || 1);
     const signedResponse = await buildEnvelope(responsePayload, generationNum);
     
+    console.log(`✓ [Auth] Operator "${email}" logged in successfully (Session: ${authResult.sessionId}, Status: ${authResult.status}, Machine: ${machineId || 'none'})`);
+
     res.json({
       ...signedResponse,
       ...responsePayload
     });
   } catch (err) {
+    const payload = (req.body && req.body.payload && typeof req.body.payload === 'object') ? req.body.payload : req.body;
+    console.warn(`⚠ [Auth] Login failed for "${payload?.email || 'unknown'}": ${err.message}`);
     next(err);
   }
 });

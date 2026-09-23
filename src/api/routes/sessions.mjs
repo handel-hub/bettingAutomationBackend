@@ -26,6 +26,7 @@ router.post('/renew', async (req, res, next) => {
     };
     
     const signedResponse = await buildEnvelope(payload, result.sessionGeneration || envelope.clientGeneration || 1);
+    console.log(`✓ [Session] Renewed session ${envelope.sessionId} (Machine: ${envelope.machineId}, Gen: ${result.sessionGeneration || envelope.clientGeneration || 1})`);
     res.json(signedResponse);
   } catch (err) {
     next(err);
@@ -36,6 +37,7 @@ router.post('/logout', async (req, res, next) => {
   try {
     const { envelope } = req;
     await logout(envelope.sessionId, envelope.machineId);
+    console.log(`ℹ [Session] Logged out session ${envelope.sessionId} (Machine: ${envelope.machineId})`);
     const signedResponse = await buildEnvelope({ success: true, loggedOut: true }, 1);
     res.json(signedResponse);
   } catch (err) {

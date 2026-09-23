@@ -75,6 +75,8 @@ export function initWebSocketServer(httpServer) {
       // @ts-ignore
       ws.sessionId = authenticatedSessionId;
 
+      console.log(`✓ [WebSocket] Client connected: session ${authenticatedSessionId} (Account: ${authenticatedAccountId})`);
+
       const currentSeq = getAccountSequence(authenticatedAccountId);
 
       // Send initial handshake envelope matching Server-to-ACP Event specification
@@ -100,6 +102,10 @@ export function initWebSocketServer(httpServer) {
         } catch {
           // ignore malformed ping/frames
         }
+      });
+
+      ws.on('close', (code, reason) => {
+        console.log(`ℹ [WebSocket] Client disconnected: session ${authenticatedSessionId}`);
       });
 
       ws.on('error', (err) => {
