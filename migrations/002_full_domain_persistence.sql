@@ -118,7 +118,7 @@ INSERT INTO global_automation_configs (
   }'::jsonb,
   '{
     "useStealthPlugin": true,
-    "browserBinary": "chromium",
+    "browserBinary": "chrome",
     "randomizeUserAgent": true,
     "blockWebRTC": true,
     "matchProxyTimezone": true,
