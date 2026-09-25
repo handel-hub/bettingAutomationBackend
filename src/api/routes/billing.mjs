@@ -62,8 +62,9 @@ async function handleCheckout(req, res, next) {
       interval
     );
 
-    const refMatch = checkoutUrl.match(/\/pay\/([^?]+)/);
-    const reference = refMatch ? refMatch[1] : (checkoutUrl.split('/').pop()?.split('?')[0] || `flw_${Date.now()}`);
+    const txRefMatch = checkoutUrl.match(/[?&]tx_ref=([^&#]+)/);
+    const payMatch = checkoutUrl.match(/\/pay\/([^?&#]+)/);
+    const reference = txRefMatch ? decodeURIComponent(txRefMatch[1]) : (payMatch ? payMatch[1] : `flw_${Date.now()}`);
 
     res.json({
       checkoutUrl,
@@ -98,13 +99,29 @@ async function handleVerify(req, res, next) {
 
     const provider = getProvider();
     let tx = null;
-    if (provider.verifyTransaction) {
-      tx = await provider.verifyTransaction(reference);
+    try {
+      if (provider.verifyTransaction) {
+        tx = await provider.verifyTransaction(reference);
+      }
+    } catch (providerErr) {
+      return res.status(400).json({
+        verified: false,
+        error: providerErr.message || 'Payment provider verification failed'
+      });
     }
 
     // Determine verification success
     const isSuccess = tx && (tx.status === 'success' || tx.status === true) &&
       (!tx.data || tx.data.status === 'successful' || !tx.data.status);
+
+    if (!isSuccess) {
+      const snapshot = await getBillingSnapshot(accountId);
+      return res.status(400).json({
+        verified: false,
+        error: 'Payment transaction was not successful or has not been completed',
+        snapshot
+      });
+    }
 
     if (isSuccess && accountId) {
       const txMeta = tx.data?.meta || tx.data?.metadata || {};
@@ -142,6 +159,7 @@ async function handleVerify(req, res, next) {
 
     const snapshot = await getBillingSnapshot(accountId);
     res.json({
+      verified: true,
       status: 'Authorized',
       snapshot
     });

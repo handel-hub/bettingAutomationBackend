@@ -156,7 +156,9 @@ export class FlutterwaveAdapter {
       throw new Error(`Flutterwave payment initialization failed: ${data.message || 'Unknown error'}`);
     }
 
-    return data.data.link;
+    const hostedLink = data.data.link;
+    const separator = hostedLink.includes('?') ? '&' : '?';
+    return `${hostedLink}${separator}tx_ref=${encodeURIComponent(txRef)}`;
   }
 
   /**
