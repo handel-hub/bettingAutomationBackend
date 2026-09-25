@@ -1,100 +1,44 @@
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+// @ts-check
 import pino from 'pino';
-import dotenv from 'dotenv';
+import { getContext } from './context.mjs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-dotenv.config({ path: path.join(__dirname, '..', '..', '.env'), quiet: true });
+const isProduction = process.env.NODE_ENV === 'production';
+const isTest = process.env.NODE_ENV === 'test';
+const logLevel = process.env.LOG_LEVEL || (isProduction ? 'info' : 'debug');
 
 /**
- * Standard Logging Class Interface wrapping Pino.
+ * Configure Pino Root Logger
+ * Note: Redaction is disabled per explicit user request for development visibility.
  */
-class Logger {
-  /**
-   * @param {string} moduleName - The name of the module or context (e.g., 'PaymentManager')
-   */
-  constructor(moduleName = 'App') {
-    this.logger = pino({
-      name: moduleName,
-      level: process.env.LOG_LEVEL || 'info',
-      transport: {
-          targets: [
-              {
-                  target: 'pino-pretty',
-                  options: {
-                      colorize: true,
-                      translateTime: 'SYS:standard',
-                      ignore: 'pid,hostname'
-                  }
-              },
-              {
-                  target: 'pino/file',
-                  options: {
-                      destination: './logs/app.log',
-                      mkdir: true
-                  }
-              }
-          ]
-      }
-    });
+export const rootLogger = pino({
+  level: logLevel,
+  formatters: {
+    level: (label) => ({ level: label }),
+  },
+  base: {
+    service: 'betting-control-plane',
+    env: process.env.NODE_ENV || 'development'
+  },
+  timestamp: pino.stdTimeFunctions.isoTime,
+  mixin() {
+    const ctx = getContext();
+    if (!ctx) return {};
+    return {
+      traceId: ctx.traceId,
+      ...(ctx.accountId ? { accountId: ctx.accountId } : {}),
+      ...(ctx.machineId ? { machineId: ctx.machineId } : {}),
+      ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {})
+    };
   }
+});
 
-  /**
-   * Log informational messages.
-   * @param {object|string} meta - Metadata object, or the message string if no metadata is provided.
-   * @param {string} [msg] - The log message (if the first argument was metadata).
-   */
-  info(meta, msg) {
-    this.logger.info(meta, msg);
-  }
-
-  /**
-   * Log warning messages.
-   * @param {object|string} meta - Metadata object, or the message string if no metadata is provided.
-   * @param {string} [msg] - The log message (if the first argument was metadata).
-   */
-  warn(meta, msg) {
-    this.logger.warn(meta, msg);
-  }
-
-  /**
-   * Log error messages.
-   * @param {Error|object|string} meta - Error object, metadata, or the message string.
-   * @param {string} [msg] - The log message (if the first argument was metadata).
-   */
-  error(meta, msg) {
-    this.logger.error(meta, msg);
-  }
-
-  /**
-   * Log debug messages.
-   * @param {object|string} meta - Metadata object, or the message string if no metadata is provided.
-   * @param {string} [msg] - The log message (if the first argument was metadata).
-   */
-  debug(meta, msg) {
-    this.logger.debug(meta, msg);
-  }
-
-  /**
-   * Log fatal messages (system-breaking errors).
-   * @param {Error|object|string} meta - Error object, metadata, or the message string.
-   * @param {string} [msg] - The log message (if the first argument was metadata).
-   */
-  fatal(meta, msg) {
-    this.logger.fatal(meta, msg);
-  }
-
-  /**
-   * Creates a child logger with additional default metadata.
-   * @param {object} defaultMeta 
-   * @returns {pino.Logger}
-   */
-  child(defaultMeta) {
-    return this.logger.child(defaultMeta);
-  }
+/**
+ * Creates a scoped child logger for a specific component
+ * @param {string} component 
+ */
+export function createScopedLogger(component) {
+  return rootLogger.child({ component });
 }
 
-// Export a default instance for quick use
-export const logger = new Logger();
+export const logger = createScopedLogger('App');
+export default logger;

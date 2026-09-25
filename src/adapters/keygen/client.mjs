@@ -1,4 +1,9 @@
 // @ts-check
+import { performance } from 'node:perf_hooks';
+import { rootLogger } from '../../utils/Logger.mjs';
+import { metrics } from '../../utils/metrics.mjs';
+
+const keygenLogger = rootLogger.child({ component: 'KeygenAdapter' });
 
 /**
  * HTTP Client for Keygen CE API
@@ -35,15 +40,49 @@ export class KeygenClient {
       return { data: { id: 'mock-keygen-id', attributes: { status: 'ACTIVE' } } };
     }
 
+    const start = performance.now();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
     try {
-      const res = await fetch(url, { ...options, headers });
+      const res = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers
+      });
+      clearTimeout(timeoutId);
+      const elapsed = performance.now() - start;
+
+      metrics.recordExternalCall('keygen', endpoint, res.status, elapsed);
+      keygenLogger.info({
+        event: 'external_call_completed',
+        provider: 'keygen',
+        endpoint,
+        statusCode: res.status,
+        durationMs: Math.round(elapsed * 100) / 100
+      }, `Keygen CE API HTTP ${res.status} (${elapsed.toFixed(1)}ms): ${endpoint}`);
+
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`Keygen API error HTTP_${res.status}: ${text}`);
       }
       return res.json();
     } catch (err) {
-      if (process.env.NODE_ENV !== 'production') {
+      clearTimeout(timeoutId);
+      const elapsed = performance.now() - start;
+      const isTimeout = err.name === 'AbortError';
+
+      metrics.recordExternalFailure('keygen', endpoint, isTimeout ? 'TIMEOUT' : 'ERROR');
+      keygenLogger.error({
+        event: 'external_call_failed',
+        provider: 'keygen',
+        endpoint,
+        isTimeout,
+        durationMs: Math.round(elapsed * 100) / 100,
+        errMessage: err.message
+      }, `Keygen CE API call failed (${isTimeout ? 'TIMEOUT' : err.message})`);
+
+      if (process.env.NODE_ENV !== 'production' && !process.env.KEYGEN_BASE_URL) {
         return { data: { id: 'stub-id', attributes: { status: 'ACTIVE' } } };
       }
       throw err;

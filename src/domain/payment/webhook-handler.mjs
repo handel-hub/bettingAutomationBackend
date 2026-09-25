@@ -1,5 +1,9 @@
 // @ts-check
 import { withTransaction } from '../../persistence/transaction.mjs';
+import { rootLogger } from '../../utils/Logger.mjs';
+import { getContext } from '../../utils/context.mjs';
+
+const paymentLogger = rootLogger.child({ component: 'PaymentWebhook' });
 
 /**
  * Handle incoming payment webhook
@@ -8,18 +12,32 @@ import { withTransaction } from '../../persistence/transaction.mjs';
  * @param {string} eventType 
  * @param {string} accountId 
  * @param {string} idempotencyKey 
- * @param {Record<string, unknown>} payload 
+ * @param {Record<string, any>} payload 
  * @returns {Promise<void>}
  */
 export async function handleWebhook(provider, providerEventId, eventType, accountId, idempotencyKey, payload) {
-  // 1. Signature verification should be done in the route or adapter before this
+  const ctx = getContext();
+  const traceId = ctx?.traceId || idempotencyKey;
+
+  // Ensure traceId is attached to payload so outbox worker inherits the causal trace
+  const enrichedPayload = {
+    ...payload,
+    _traceId: traceId,
+    _provider: provider
+  };
   
   // 2. Transactional outbox insert
   return withTransaction('READ COMMITTED', async (client) => {
     // Check if we already processed this provider event
     const existingRes = await client.query('SELECT event_id FROM payment_events WHERE provider_event_id = $1', [providerEventId]);
     if (existingRes.rows.length > 0) {
-      return; // Already processed
+      paymentLogger.info({
+        event: 'payment_webhook_duplicate_skipped',
+        provider,
+        providerEventId,
+        accountId
+      }, `Duplicate payment webhook received and skipped: ${providerEventId}`);
+      return;
     }
     
     // Determine initial payment status
@@ -36,6 +54,16 @@ export async function handleWebhook(provider, providerEventId, eventType, accoun
     await client.query(`
       INSERT INTO outbox_events (event_type, payload, idempotency_key)
       VALUES ($1, $2, $3)
-    `, [eventType, JSON.stringify(payload), idempotencyKey]);
+    `, [eventType, JSON.stringify(enrichedPayload), idempotencyKey]);
+
+    paymentLogger.info({
+      event: 'payment_webhook_enqueued',
+      provider,
+      providerEventId,
+      eventType,
+      accountId,
+      paymentStatus,
+      traceId
+    }, `Payment webhook enqueued into outbox: ${eventType} (${provider})`);
   });
 }

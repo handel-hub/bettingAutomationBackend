@@ -1,5 +1,9 @@
 // @ts-check
 import { buildEnvelope } from '../../protocol/envelope.mjs';
+import { rootLogger } from '../../utils/Logger.mjs';
+import { getContext } from '../../utils/context.mjs';
+
+const errLogger = rootLogger.child({ component: 'ErrorHandler' });
 
 /**
  * Standardized Machine-Readable Error Taxonomy Registry
@@ -224,10 +228,26 @@ export async function errorHandler(err, req, res, next) {
     }
   }
 
-  // Only dump full stack traces for unexpected internal 500 errors.
-  // 4xx operational errors (e.g. invalid credentials, expired session) should not pollute the console with error traces.
+  const ctx = getContext();
+  const traceId = ctx?.traceId || req.headers['x-request-id'] || req.headers['x-trace-id'] || req.envelope?.nonce || undefined;
+
+  const logMeta = {
+    event: 'error_response_emitted',
+    errorCode: code,
+    legacyCode,
+    category,
+    statusCode,
+    retryable,
+    route: req.originalUrl,
+    method: req.method,
+    traceId
+  };
+
+  // 5xx errors log at error level with stack trace; 4xx client errors log at warn level without noise
   if (statusCode >= 500) {
-    console.error(err);
+    errLogger.error({ ...logMeta, err }, `Internal Server Error [${code}]: ${message}`);
+  } else {
+    errLogger.warn(logMeta, `Client Operation Rejected [${code}]: ${message}`);
   }
 
   res.status(statusCode);
@@ -239,7 +259,7 @@ export async function errorHandler(err, req, res, next) {
     category,
     retryable,
     timestamp: new Date().toISOString(),
-    requestId: req.headers['x-request-id'] || req.headers['x-trace-id'] || req.envelope?.nonce || undefined
+    requestId: traceId
   };
 
   // If request was a signed Protocol Envelope, return signed envelope with error
@@ -251,7 +271,7 @@ export async function errorHandler(err, req, res, next) {
         error: errorObj
       });
     } catch (signErr) {
-      console.error('Failed to sign error response (KMS down?)', signErr);
+      errLogger.error({ event: 'error_sign_failed', signErr, traceId }, 'Failed to sign error response (KMS down?)');
       return res.status(503).json({
         error: {
           code: 'BE_SYS_SERVICE_UNAVAILABLE',

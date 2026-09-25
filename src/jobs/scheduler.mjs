@@ -1,7 +1,12 @@
 // @ts-check
+import { performance } from 'node:perf_hooks';
 import { getPool } from '../persistence/connection.mjs';
+import { rootLogger } from '../utils/Logger.mjs';
+import { metrics } from '../utils/metrics.mjs';
 
+const jobLogger = rootLogger.child({ component: 'JobScheduler' });
 const jobs = [];
+const activeIntervals = [];
 
 /**
  * Register a scheduled job
@@ -13,15 +18,27 @@ export function registerJob(name, intervalMs, handler) {
   jobs.push({ name, intervalMs, handler });
 }
 
+export function stopScheduler() {
+  for (const intervalId of activeIntervals) {
+    clearInterval(intervalId);
+  }
+  activeIntervals.length = 0;
+  jobLogger.info({ event: 'scheduler_stopped' }, 'Job scheduler stopped');
+}
+
 export function startScheduler() {
   const pool = getPool();
   
   for (const job of jobs) {
-    console.log(`Registered job ${job.name} (every ${job.intervalMs}ms)`);
+    jobLogger.info({
+      event: 'job_registered',
+      jobName: job.name,
+      intervalMs: job.intervalMs
+    }, `Registered job ${job.name} (every ${job.intervalMs}ms)`);
     
-    setInterval(async () => {
+    const intervalId = setInterval(async () => {
       // 1. Acquire advisory lock using a hash of the job name
-      const lockKey = job.name.split('').reduce((a,b)=>{a=((a<<5)-a)+b.charCodeAt(0);return a&a},0);
+      const lockKey = job.name.split('').reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a; }, 0);
       
       const client = await pool.connect();
       let hasLock = false;
@@ -48,25 +65,52 @@ export function startScheduler() {
           return;
         }
         
-        // 3. Run job
+        // 3. Run job with duration measurement
+        const start = performance.now();
+        let success = false;
         try {
           await job.handler(client);
           await client.query('UPDATE scheduled_jobs SET last_success_at = now() WHERE job_name = $1', [job.name]);
+          success = true;
+          const elapsed = performance.now() - start;
+          metrics.recordJobRun(job.name, elapsed, true);
+          jobLogger.info({
+            event: 'scheduled_job_completed',
+            jobName: job.name,
+            durationMs: Math.round(elapsed * 100) / 100
+          }, `Job ${job.name} completed successfully in ${elapsed.toFixed(1)}ms`);
         } catch (err) {
-          console.error(`Job ${job.name} failed:`, err);
+          const elapsed = performance.now() - start;
+          metrics.recordJobRun(job.name, elapsed, false);
+          jobLogger.error({
+            event: 'scheduled_job_failed',
+            jobName: job.name,
+            durationMs: Math.round(elapsed * 100) / 100,
+            err
+          }, `Job ${job.name} failed (${elapsed.toFixed(1)}ms): ${err.message}`);
         }
       } catch (err) {
-        console.error(`Error in scheduler for ${job.name}:`, err);
+        jobLogger.error({
+          event: 'scheduler_error',
+          jobName: job.name,
+          err
+        }, `Error in scheduler for ${job.name}: ${err.message}`);
       } finally {
         if (hasLock) {
           try {
             await client.query('SELECT pg_advisory_unlock($1)', [lockKey]);
           } catch (unlockErr) {
-            console.error(`Failed to release advisory lock for ${job.name}:`, unlockErr);
+            jobLogger.error({
+              event: 'advisory_unlock_failed',
+              jobName: job.name,
+              unlockErr
+            }, `Failed to release advisory lock for ${job.name}: ${unlockErr.message}`);
           }
         }
         client.release();
       }
     }, job.intervalMs);
+
+    activeIntervals.push(intervalId);
   }
 }

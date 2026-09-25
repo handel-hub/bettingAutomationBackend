@@ -1,5 +1,9 @@
 // @ts-check
 import { getPool } from '../../persistence/connection.mjs';
+import { rootLogger } from '../../utils/Logger.mjs';
+import { updateContext } from '../../utils/context.mjs';
+
+const authLogger = rootLogger.child({ component: 'OperatorAuth' });
 
 /**
  * Authentication middleware for /api/v1/... endpoints.
@@ -16,6 +20,7 @@ export async function operatorAuth(req, res, next) {
   try {
     // 1. If already validated by envelopeValidator
     if (req.accountId) {
+      updateContext({ accountId: req.accountId, machineId: req.machineId, sessionId: req.sessionId });
       return next();
     }
 
@@ -48,6 +53,12 @@ export async function operatorAuth(req, res, next) {
 
       if (sessRes.rows.length > 0) {
         if (sessRes.rows[0].account_status === 'LOCKED') {
+          authLogger.warn({
+            event: 'operator_auth_rejected',
+            reason: 'account_locked',
+            accountId: sessRes.rows[0].account_id,
+            sessionId
+          }, 'Operator authentication rejected: account locked');
           return res.status(423).json({
             error: { code: 'ACCOUNT_LOCKED', message: 'Account is locked' }
           });
@@ -59,6 +70,12 @@ export async function operatorAuth(req, res, next) {
     }
 
     if (!accountId) {
+      authLogger.warn({
+        event: 'operator_auth_rejected',
+        reason: sessionId ? 'session_expired_or_invalid' : 'missing_credentials',
+        hasAuthHeader: Boolean(authHeader),
+        hasSessionHeader: Boolean(sessionHeader)
+      }, 'Operator authentication required: invalid or missing session');
       return res.status(401).json({
         error: {
           code: 'UNAUTHORIZED',
@@ -69,9 +86,9 @@ export async function operatorAuth(req, res, next) {
 
     // @ts-ignore
     req.accountId = accountId;
+    updateContext({ accountId, sessionId: sessionId || undefined });
     next();
   } catch (err) {
     next(err);
   }
 }
-

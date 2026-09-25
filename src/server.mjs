@@ -2,8 +2,13 @@
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
+import http from 'http';
+import { performance } from 'node:perf_hooks';
 import { loadConfig } from './config/index.mjs';
 import { errorHandler } from './api/middleware/error-handler.mjs';
+import { requestTracer } from './api/middleware/request-tracer.mjs';
+import { rootLogger } from './utils/Logger.mjs';
+import { metrics } from './utils/metrics.mjs';
 
 import paymentRouter from './api/routes/payments.mjs';
 import authRouter from './api/routes/auth.mjs';
@@ -26,11 +31,17 @@ import supportRouter from './api/routes/support.mjs';
 import platformsRouter from './api/routes/platforms.mjs';
 import telemetryRouter from './api/routes/telemetry.mjs';
 import preludeRouter from './api/routes/prelude.mjs';
-import { initWebSocketServer } from './websocket/server.mjs';
-import http from 'http';
+import { initWebSocketServer, closeWebSocketServer } from './websocket/server.mjs';
+import { startWorker, stopWorker } from './outbox/worker.mjs';
+import { initializeJobs } from './jobs/index.mjs';
+import { stopScheduler } from './jobs/scheduler.mjs';
+import { bootstrapDevAccounts } from './persistence/bootstrap.mjs';
+import { closePool } from './persistence/connection.mjs';
 
 const app = express();
+const sysLogger = rootLogger.child({ component: 'Server' });
 
+app.use(requestTracer);
 app.use(helmet());
 app.use(express.json({
   verify: (req, res, buf) => {
@@ -80,14 +91,53 @@ app.use('/telemetry', telemetryRouter);
 app.use('/api/v1/prelude', preludeRouter);
 app.use('/prelude', preludeRouter);
 
-app.get('/health/live', (req, res) => res.json({ status: 'ok' }));
-app.get('/health/ready', (req, res) => res.json({ status: 'ready' }));
+// Deep Health & Metrics Endpoints
+app.get('/health/live', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: Math.round(process.uptime())
+  });
+});
+
+app.get('/health/ready', async (req, res) => {
+  try {
+    const { getPool } = await import('./persistence/connection.mjs');
+    const pool = getPool();
+    const start = performance.now();
+    await pool.query('SELECT 1');
+    const dbPingMs = performance.now() - start;
+
+    res.json({
+      status: 'ready',
+      timestamp: new Date().toISOString(),
+      db: {
+        status: 'connected',
+        pingMs: Math.round(dbPingMs * 100) / 100,
+        totalConnections: pool.totalCount,
+        idleConnections: pool.idleCount,
+        waitingClients: pool.waitingCount
+      }
+    });
+  } catch (err) {
+    sysLogger.error({ event: 'readiness_check_failed', err }, 'Readiness check failed');
+    res.status(503).json({
+      status: 'unhealthy',
+      error: 'Database connection failed',
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+app.get('/metrics', (req, res) => {
+  if (req.headers['accept']?.includes('text/plain')) {
+    res.setHeader('Content-Type', 'text/plain; version=0.0.4');
+    return res.send(metrics.getPrometheusFormat());
+  }
+  res.json(metrics.getSnapshot());
+});
 
 app.use(errorHandler);
-
-import { startWorker } from './outbox/worker.mjs';
-import { initializeJobs } from './jobs/index.mjs';
-import { bootstrapDevAccounts } from './persistence/bootstrap.mjs';
 
 const config = loadConfig();
 const port = config.PORT || 3001;
@@ -98,10 +148,52 @@ initializePaymentAdapter(config.PAYMENT_PROVIDER, config);
 export const httpServer = http.createServer(app);
 initWebSocketServer(httpServer);
 
-// Only listen if run directly
+// Graceful shutdown logic
+let isShuttingDown = false;
+export async function gracefulShutdown(signal = 'SIGTERM') {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  sysLogger.info({ event: 'shutdown_initiated', signal }, `Received ${signal}, initiating graceful shutdown`);
+
+  // 1. Stop background workers
+  try {
+    stopWorker();
+    stopScheduler();
+  } catch (err) {
+    sysLogger.error({ event: 'shutdown_worker_error', err }, 'Error stopping workers during shutdown');
+  }
+
+  // 2. Close WebSockets
+  try {
+    closeWebSocketServer();
+  } catch (err) {
+    sysLogger.error({ event: 'shutdown_ws_error', err }, 'Error closing WebSocket server');
+  }
+
+  // 3. Close HTTP server
+  if (httpServer.listening) {
+    await new Promise((resolve) => httpServer.close(resolve));
+    sysLogger.info({ event: 'http_server_closed' }, 'HTTP server stopped accepting connections');
+  }
+
+  // 4. Close database pool
+  try {
+    await closePool();
+    sysLogger.info({ event: 'db_pool_closed' }, 'PostgreSQL connection pool closed');
+  } catch (err) {
+    sysLogger.error({ event: 'shutdown_db_error', err }, 'Error closing database pool');
+  }
+
+  sysLogger.info({ event: 'shutdown_completed' }, 'Graceful shutdown completed successfully');
+}
+
+// Only register signal handlers if running directly in node process
 if (process.argv[1] && process.argv[1].endsWith('server.mjs')) {
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
   httpServer.listen(port, async () => {
-    console.log(`Backend server listening on port ${port}`);
+    sysLogger.info({ event: 'server_started', port, env: config.NODE_ENV }, `Backend server listening on port ${port}`);
     
     // Auto-bootstrap default developer accounts idempotently if running in development mode
     if (config.NODE_ENV === 'development') {

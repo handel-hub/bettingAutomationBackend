@@ -1,1 +1,2 @@
-export { logger } from './Logger.mjs';
+export { logger, rootLogger, createScopedLogger } from './Logger.mjs';
+export { runWithContext, getContext, updateContext, incrementQueryMetrics } from './context.mjs';

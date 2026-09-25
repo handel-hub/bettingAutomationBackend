@@ -1,9 +1,16 @@
 // @ts-check
+import { performance } from 'node:perf_hooks';
 import { getPool } from '../persistence/connection.mjs';
 import { withTransaction } from '../persistence/transaction.mjs';
 import { randomUUID } from 'crypto';
+import { runWithContext } from '../utils/context.mjs';
+import { rootLogger } from '../utils/Logger.mjs';
+import { metrics } from '../utils/metrics.mjs';
 
+const outboxLogger = rootLogger.child({ component: 'OutboxWorker' });
 const WORKER_ID = `worker-${randomUUID()}`;
+
+let workerInterval = null;
 
 export async function claimNextEvent() {
   const pool = getPool();
@@ -30,8 +37,9 @@ export async function claimNextEvent() {
 /**
  * @param {string} eventId 
  * @param {boolean} success 
+ * @param {string} [lastError]
  */
-export async function completeEvent(eventId, success) {
+export async function completeEvent(eventId, success, lastError = null) {
   const pool = getPool();
   if (success) {
     await pool.query(`
@@ -57,139 +65,168 @@ export async function completeEvent(eventId, success) {
  * @returns {Promise<boolean>} success
  */
 export async function processOutboxEvent(event) {
-  return withTransaction('READ COMMITTED', async (client) => {
-    if (event.event_type === 'REVOCATION_NOTICE') {
-      const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
-      const { broadcast } = await import('../websocket/server.mjs');
-      const targetAccountId = payload.scope === 'ACCOUNT' ? payload.targetId : null;
-      broadcast('LICENSE_REVOKED', {
-        scope: payload.scope,
-        targetId: payload.targetId,
-        reason: payload.reason,
-        timestamp: new Date().toISOString()
-      }, targetAccountId);
-      broadcast('revocation:notice', {
-        scope: payload.scope,
-        targetId: payload.targetId,
-        reason: payload.reason,
-        timestamp: new Date().toISOString()
-      }, targetAccountId);
-      return true;
-    } else if (event.event_type === 'SUBSCRIPTION_EXPIRED') {
-      const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
-      const { broadcast } = await import('../websocket/server.mjs');
-      broadcast('SUBSCRIPTION_STATUS_CHANGED', {
-        subscriptionId: payload.subscriptionId,
-        accountId: payload.accountId,
-        subscription: {
-          planId: 'pro',
-          status: 'EXPIRED'
-        },
-        timestamp: new Date().toISOString()
-      }, payload.accountId);
-      broadcast('subscription:expired', {
-        subscriptionId: payload.subscriptionId,
-        accountId: payload.accountId,
-        timestamp: new Date().toISOString()
-      }, payload.accountId);
-      return true;
-    } else if (event.event_type.startsWith('PAYMENT_') || event.event_type.startsWith('charge.')) {
-      const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
-      
-      const isExplicitPaystack = payload._provider === 'paystack' || payload.provider === 'paystack';
-      const isExplicitFlw = payload._provider === 'flutterwave' || payload.provider === 'flutterwave';
-      const isFlw = isExplicitFlw || (!isExplicitPaystack && Boolean(payload.data?.flw_ref || (!payload.data?.channel && !payload.data?.authorization && payload.data?.charged_amount)));
-      const isFlwSuccess = (event.event_type === 'charge.completed' || event.event_type === 'PAYMENT_SUCCESS') && (payload.data?.status === 'successful' || !payload.data?.status);
-      const isPaystackSuccess = event.event_type === 'charge.success' || event.event_type === 'PAYMENT_SUCCESS';
+  const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
+  const traceId = payload?._traceId || payload?.traceId || event.idempotency_key || `outbox-${event.event_id}`;
+  const accountId = payload?.accountId || payload?.data?.meta?.account_id || payload?.data?.metadata?.account_id || payload?.account_id;
 
-      // 1. Success charge processing
-      if (isPaystackSuccess || isFlwSuccess) {
-        const accountId = payload.data?.meta?.account_id || payload.data?.metadata?.account_id || payload.account_id;
-        console.log(`✓ Processing successful payment for account: ${accountId}`);
-        
-        if (accountId) {
-          const planId = payload.data?.meta?.plan_id || payload.data?.metadata?.plan_id || payload.plan_id || 'PRO';
-          const ref = payload.data?.tx_ref || payload.data?.reference || `ref-${Date.now()}`;
-          const billingInterval = (payload.data?.meta?.billing_interval || payload.data?.metadata?.billing_interval || 'monthly').toLowerCase();
+  const context = {
+    traceId,
+    accountId,
+    startTime: performance.now(),
+    queryCount: 0,
+    queryDurationMs: 0
+  };
+
+  return runWithContext(context, async () => {
+    return withTransaction('READ COMMITTED', async (client) => {
+      if (event.event_type === 'REVOCATION_NOTICE') {
+        const { broadcast } = await import('../websocket/server.mjs');
+        const targetAccountId = payload.scope === 'ACCOUNT' ? payload.targetId : null;
+        broadcast('LICENSE_REVOKED', {
+          scope: payload.scope,
+          targetId: payload.targetId,
+          reason: payload.reason,
+          timestamp: new Date().toISOString()
+        }, targetAccountId);
+        broadcast('revocation:notice', {
+          scope: payload.scope,
+          targetId: payload.targetId,
+          reason: payload.reason,
+          timestamp: new Date().toISOString()
+        }, targetAccountId);
+        return true;
+      } else if (event.event_type === 'SUBSCRIPTION_EXPIRED') {
+        const { broadcast } = await import('../websocket/server.mjs');
+        broadcast('SUBSCRIPTION_STATUS_CHANGED', {
+          subscriptionId: payload.subscriptionId,
+          accountId: payload.accountId,
+          subscription: {
+            planId: 'pro',
+            status: 'EXPIRED'
+          },
+          timestamp: new Date().toISOString()
+        }, payload.accountId);
+        broadcast('subscription:expired', {
+          subscriptionId: payload.subscriptionId,
+          accountId: payload.accountId,
+          timestamp: new Date().toISOString()
+        }, payload.accountId);
+        return true;
+      } else if (event.event_type.startsWith('PAYMENT_') || event.event_type.startsWith('charge.')) {
+        const isExplicitPaystack = payload._provider === 'paystack' || payload.provider === 'paystack';
+        const isExplicitFlw = payload._provider === 'flutterwave' || payload.provider === 'flutterwave';
+        const isFlw = isExplicitFlw || (!isExplicitPaystack && Boolean(payload.data?.flw_ref || (!payload.data?.channel && !payload.data?.authorization && payload.data?.charged_amount)));
+        const isFlwSuccess = (event.event_type === 'charge.completed' || event.event_type === 'PAYMENT_SUCCESS') && (payload.data?.status === 'successful' || !payload.data?.status);
+        const isPaystackSuccess = event.event_type === 'charge.success' || event.event_type === 'PAYMENT_SUCCESS';
+
+        // 1. Success charge processing
+        if (isPaystackSuccess || isFlwSuccess) {
+          const accId = payload.data?.meta?.account_id || payload.data?.metadata?.account_id || payload.account_id;
+          outboxLogger.info({
+            event: 'payment_charge_success_processing',
+            accountId: accId,
+            eventId: event.event_id,
+            traceId
+          }, `Processing successful payment for account: ${accId}`);
           
-          let majorAmount;
-          if (isFlw) {
-            majorAmount = Number(payload.data?.charged_amount || payload.data?.amount || 10000);
-          } else {
-            const rawAmount = payload.data?.amount || 1000000;
-            majorAmount = (typeof rawAmount === 'number' && rawAmount >= 100) ? (rawAmount / 100) : rawAmount;
-          }
-
-          const providerSubId = payload.data?.subscription_code || payload.data?.flw_ref || `sub-${ref}`;
-          const { applyPaymentSuccess } = await import('../domain/billing/service.mjs');
-          await applyPaymentSuccess(client, {
-            accountId,
-            planId,
-            billingInterval,
-            amount: majorAmount,
-            reference: ref,
-            receiptUrl: payload.data?.receipt_url || null,
-            providerSubId
-          });
-        }
-      } else if (
-        event.event_type === 'charge.failed' || 
-        event.event_type === 'PAYMENT_FAILED' ||
-        (event.event_type === 'charge.completed' && payload.data?.status && payload.data?.status !== 'successful') ||
-        event.event_type.includes('fail') ||
-        event.event_type.includes('declined')
-      ) {
-        const accountId = payload.data?.meta?.account_id || payload.data?.metadata?.account_id || payload.account_id;
-        const reason = payload.data?.gateway_response || payload.data?.processor_response || payload.reason || 'Payment declined by bank';
-        console.warn(`⚠ Processing failed/declined payment for account ${accountId}: ${reason}`);
-        
-        if (accountId) {
-          // Mark subscription as PAST_DUE on failed charge
-          await client.query(
-            "UPDATE subscriptions SET status = 'PAST_DUE' WHERE account_id = $1 AND status = 'ACTIVE'",
-            [accountId]
-          );
-
-          // Audit log the failed payment attempt
-          const { logEvent } = await import('../domain/audit/service.mjs');
-          const providerName = isFlw ? 'flutterwave' : 'paystack';
-          await logEvent(client, {
-            accountId,
-            eventType: 'PAYMENT_FAILED',
-            severity: 'MEDIUM',
-            actorType: 'PROVIDER',
-            actorId: providerName,
-            result: 'FAILURE',
-            reason,
-            metadata: {
-              reference: payload.data?.tx_ref || payload.data?.reference,
-              amount: payload.data?.amount,
-              channel: payload.data?.channel
+          if (accId) {
+            const planId = payload.data?.meta?.plan_id || payload.data?.metadata?.plan_id || payload.plan_id || 'PRO';
+            const ref = payload.data?.tx_ref || payload.data?.reference || `ref-${Date.now()}`;
+            const billingInterval = (payload.data?.meta?.billing_interval || payload.data?.metadata?.billing_interval || 'monthly').toLowerCase();
+            
+            let majorAmount;
+            if (isFlw) {
+              majorAmount = Number(payload.data?.charged_amount || payload.data?.amount || 10000);
+            } else {
+              const rawAmount = payload.data?.amount || 1000000;
+              majorAmount = (typeof rawAmount === 'number' && rawAmount >= 100) ? (rawAmount / 100) : rawAmount;
             }
-          });
 
-          // Broadcast to connected ACP / UI instances
-          try {
-            const { broadcast } = await import('../websocket/server.mjs');
-            broadcast('SUBSCRIPTION_STATUS_CHANGED', {
-              accountId,
-              subscription: {
-                status: 'PAST_DUE'
-              },
-              timestamp: new Date().toISOString()
-            }, accountId);
-          } catch (wsErr) {
-            // Non-critical if websocket is not active
+            const providerSubId = payload.data?.subscription_code || payload.data?.flw_ref || `sub-${ref}`;
+            const { applyPaymentSuccess } = await import('../domain/billing/service.mjs');
+            await applyPaymentSuccess(client, {
+              accountId: accId,
+              planId,
+              billingInterval,
+              amount: majorAmount,
+              reference: ref,
+              receiptUrl: payload.data?.receipt_url || null,
+              providerSubId
+            });
+          }
+        } else if (
+          event.event_type === 'charge.failed' || 
+          event.event_type === 'PAYMENT_FAILED' ||
+          (event.event_type === 'charge.completed' && payload.data?.status && payload.data?.status !== 'successful') ||
+          event.event_type.includes('fail') ||
+          event.event_type.includes('declined')
+        ) {
+          const accId = payload.data?.meta?.account_id || payload.data?.metadata?.account_id || payload.account_id;
+          const reason = payload.data?.gateway_response || payload.data?.processor_response || payload.reason || 'Payment declined by bank';
+          outboxLogger.warn({
+            event: 'payment_charge_failed_processing',
+            accountId: accId,
+            reason,
+            eventId: event.event_id,
+            traceId
+          }, `Processing failed/declined payment for account ${accId}: ${reason}`);
+          
+          if (accId) {
+            // Mark subscription as PAST_DUE on failed charge
+            await client.query(
+              "UPDATE subscriptions SET status = 'PAST_DUE' WHERE account_id = $1 AND status = 'ACTIVE'",
+              [accId]
+            );
+
+            // Audit log the failed payment attempt
+            const { logEvent } = await import('../domain/audit/service.mjs');
+            const providerName = isFlw ? 'flutterwave' : 'paystack';
+            await logEvent(client, {
+              accountId: accId,
+              eventType: 'PAYMENT_FAILED',
+              severity: 'MEDIUM',
+              actorType: 'PROVIDER',
+              actorId: providerName,
+              result: 'FAILURE',
+              reason,
+              metadata: {
+                reference: payload.data?.tx_ref || payload.data?.reference,
+                amount: payload.data?.amount,
+                channel: payload.data?.channel
+              }
+            });
+
+            // Broadcast to connected ACP / UI instances
+            try {
+              const { broadcast } = await import('../websocket/server.mjs');
+              broadcast('SUBSCRIPTION_STATUS_CHANGED', {
+                accountId: accId,
+                subscription: {
+                  status: 'PAST_DUE'
+                },
+                timestamp: new Date().toISOString()
+              }, accId);
+            } catch (wsErr) {
+              // Non-critical if websocket is not active
+            }
           }
         }
       }
-    }
-    return true;
+      return true;
+    });
   });
 }
 
-export async function startWorker() {
-  console.log(`Starting Outbox Worker ${WORKER_ID}`);
+export function stopWorker() {
+  if (workerInterval) {
+    clearInterval(workerInterval);
+    workerInterval = null;
+    outboxLogger.info({ event: 'outbox_worker_stopped' }, 'Outbox worker stopped');
+  }
+}
+
+export function startWorker() {
+  outboxLogger.info({ event: 'outbox_worker_started', workerId: WORKER_ID }, `Starting Outbox Worker ${WORKER_ID}`);
   let isRunning = false;
 
   const runDrainCycle = async () => {
@@ -201,27 +238,51 @@ export async function startWorker() {
         const event = await claimNextEvent();
         if (!event) break;
         drained++;
-        console.log(`Processing outbox event: ${event.event_id}`);
+
+        const start = performance.now();
         let success = false;
+        let lastError = null;
+
         try {
           success = await processOutboxEvent(event);
         } catch (procErr) {
-          console.error(`Error processing outbox event ${event.event_id}:`, procErr);
+          lastError = procErr.message;
+          outboxLogger.error({
+            event: 'outbox_event_processing_error',
+            eventId: event.event_id,
+            eventType: event.event_type,
+            procErr
+          }, `Error processing outbox event ${event.event_id}: ${procErr.message}`);
           success = false;
         } finally {
+          const elapsed = performance.now() - start;
+          metrics.recordOutboxEvent(event.event_type, elapsed, success);
+
           try {
-            await completeEvent(event.event_id, success);
+            await completeEvent(event.event_id, success, lastError);
+            outboxLogger.info({
+              event: 'outbox_event_completed',
+              eventId: event.event_id,
+              eventType: event.event_type,
+              success,
+              durationMs: Math.round(elapsed * 100) / 100
+            }, `Completed outbox event ${event.event_id} (${success ? 'DELIVERED' : 'RETRY'}) in ${elapsed.toFixed(1)}ms`);
           } catch (completeErr) {
-            console.error(`Failed to complete outbox event ${event.event_id}:`, completeErr);
+            outboxLogger.error({
+              event: 'outbox_complete_event_error',
+              eventId: event.event_id,
+              completeErr
+            }, `Failed to complete outbox event ${event.event_id}: ${completeErr.message}`);
           }
         }
       }
     } catch (err) {
-      console.error('Outbox worker loop error:', err);
+      outboxLogger.error({ event: 'outbox_worker_loop_error', err }, `Outbox worker loop error: ${err.message}`);
     } finally {
       isRunning = false;
     }
   };
 
-  return setInterval(runDrainCycle, 5000); // Poll every 5s
+  workerInterval = setInterval(runDrainCycle, 5000);
+  return workerInterval;
 }

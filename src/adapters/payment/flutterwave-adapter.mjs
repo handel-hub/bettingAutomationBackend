@@ -1,5 +1,10 @@
 // @ts-check
 import crypto, { randomUUID } from 'crypto';
+import { performance } from 'node:perf_hooks';
+import { rootLogger } from '../../utils/Logger.mjs';
+import { metrics } from '../../utils/metrics.mjs';
+
+const flwLogger = rootLogger.child({ component: 'FlutterwaveAdapter' });
 
 /**
  * Flutterwave v3 Payment Adapter
@@ -102,14 +107,44 @@ export class FlutterwaveAdapter {
       }
     };
 
-    const res = await fetch(`${this.baseUrl}/payments`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.secretKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
+    const start = performance.now();
+    let res;
+    try {
+      res = await fetch(`${this.baseUrl}/payments`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.secretKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(7000)
+      });
+    } catch (fetchErr) {
+      const elapsed = performance.now() - start;
+      const isTimeout = fetchErr.name === 'TimeoutError' || fetchErr.name === 'AbortError';
+      metrics.recordExternalFailure('flutterwave', '/payments', isTimeout ? 'TIMEOUT' : 'ERROR');
+      flwLogger.error({
+        event: 'external_call_failed',
+        provider: 'flutterwave',
+        endpoint: '/payments',
+        isTimeout,
+        durationMs: Math.round(elapsed * 100) / 100,
+        txRef,
+        errMessage: fetchErr.message
+      }, `Flutterwave /payments call failed (${isTimeout ? 'TIMEOUT' : fetchErr.message})`);
+      throw fetchErr;
+    }
+
+    const elapsed = performance.now() - start;
+    metrics.recordExternalCall('flutterwave', '/payments', res.status, elapsed);
+    flwLogger.info({
+      event: 'external_call_completed',
+      provider: 'flutterwave',
+      endpoint: '/payments',
+      statusCode: res.status,
+      durationMs: Math.round(elapsed * 100) / 100,
+      txRef
+    }, `Flutterwave /payments HTTP ${res.status} (${elapsed.toFixed(1)}ms)`);
 
     if (!res.ok) {
       const errText = await res.text();
@@ -195,13 +230,43 @@ export class FlutterwaveAdapter {
       ? `${this.baseUrl}/transactions/verify_by_reference?tx_ref=${encodeURIComponent(paramStr)}`
       : `${this.baseUrl}/transactions/${paramStr}/verify`;
 
-    const res = await fetch(verifyUrl, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${this.secretKey}`,
-        'Content-Type': 'application/json'
-      }
-    });
+    const start = performance.now();
+    let res;
+    try {
+      res = await fetch(verifyUrl, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${this.secretKey}`,
+          'Content-Type': 'application/json'
+        },
+        signal: AbortSignal.timeout(7000)
+      });
+    } catch (fetchErr) {
+      const elapsed = performance.now() - start;
+      const isTimeout = fetchErr.name === 'TimeoutError' || fetchErr.name === 'AbortError';
+      metrics.recordExternalFailure('flutterwave', '/transactions/verify', isTimeout ? 'TIMEOUT' : 'ERROR');
+      flwLogger.error({
+        event: 'external_call_failed',
+        provider: 'flutterwave',
+        endpoint: '/transactions/verify',
+        isTimeout,
+        durationMs: Math.round(elapsed * 100) / 100,
+        transactionIdOrRef: paramStr,
+        errMessage: fetchErr.message
+      }, `Flutterwave verify call failed (${isTimeout ? 'TIMEOUT' : fetchErr.message})`);
+      throw fetchErr;
+    }
+
+    const elapsed = performance.now() - start;
+    metrics.recordExternalCall('flutterwave', '/transactions/verify', res.status, elapsed);
+    flwLogger.info({
+      event: 'external_call_completed',
+      provider: 'flutterwave',
+      endpoint: '/transactions/verify',
+      statusCode: res.status,
+      durationMs: Math.round(elapsed * 100) / 100,
+      transactionIdOrRef: paramStr
+    }, `Flutterwave verify HTTP ${res.status} (${elapsed.toFixed(1)}ms)`);
 
     if (!res.ok) {
       const errText = await res.text();
