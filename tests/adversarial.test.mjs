@@ -207,6 +207,9 @@ test('Adversarial & Edge-Case Security Test Suite', async (t) => {
 after(async () => {
   setSystemEpoch(1);
   if (httpServer.listening) {
+    if (typeof httpServer.closeAllConnections === 'function') {
+      httpServer.closeAllConnections();
+    }
     await new Promise((resolve) => httpServer.close(resolve));
   }
   await closePool();

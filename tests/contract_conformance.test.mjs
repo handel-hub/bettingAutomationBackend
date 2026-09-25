@@ -322,8 +322,14 @@ test('Target Architecture & Contract Specification Conformance Suite', async (t)
 
 after(async () => {
   const pool = getPool();
+  await pool.query("DELETE FROM betting_accounts WHERE platform_display_name = 'Betland International'");
+  await pool.query("DELETE FROM platform_registry WHERE id LIKE 'newbookie_%'");
+  await pool.query("DELETE FROM support_channels WHERE id LIKE 'chan_%'");
   await pool.query("DELETE FROM machines WHERE installation_id LIKE 'inst-contract%'");
   if (httpServer.listening) {
+    if (typeof httpServer.closeAllConnections === 'function') {
+      httpServer.closeAllConnections();
+    }
     await new Promise((resolve) => httpServer.close(resolve));
   }
   await closePool();

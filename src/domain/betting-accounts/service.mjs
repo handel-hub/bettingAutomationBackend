@@ -113,7 +113,7 @@ function maskPassword(pass) {
  * @returns {Promise<Object>}
  */
 export async function createBettingAccount(accountId, data) {
-  const { name, platformDisplayName, accountUsername, accountPassword, tags = [] } = data;
+  const { id, name, platformDisplayName, accountUsername, accountPassword, tags = [] } = data;
 
   if (!platformDisplayName || !accountUsername || !accountPassword) {
     throw new Error('Platform, username, and password are required');
@@ -125,6 +125,7 @@ export async function createBettingAccount(accountId, data) {
 
   return withTransaction('READ COMMITTED', async (client) => {
     const acc = await insertAccount(client, {
+      id,
       accountId,
       name: name || `${platformDisplayName} - ${accountUsername}`,
       platformDisplayName,
@@ -260,10 +261,20 @@ export async function getBettingAccount(accountId, id) {
  * @returns {Promise<Object>}
  */
 export async function executeAccountAction(accountId, id, actionType) {
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!UUID_REGEX.test(id)) {
+    const err = new Error(`Invalid account ID format: expected UUID, received "${id}"`);
+    // @ts-ignore
+    err.code = 'BE_VAL_INVALID_UUID';
+    // @ts-ignore
+    err.status = 400;
+    throw err;
+  }
+
   if (actionType === 'DELETE_ACCOUNT' || actionType === 'DELETE') {
     const res = await deleteAccount(undefined, accountId, id);
     if (!res) throw new Error('Account not found');
-    return { success: true, accountId: id, action: 'DELETED' };
+    return { success: true, accountId: id, action: 'DELETED', backendState: 'DELETED', presentationCategory: 'Neutral', statusDescription: 'Account deleted' };
   }
 
   let newState = 'ACTIVE';
@@ -287,7 +298,13 @@ export async function executeAccountAction(accountId, id, actionType) {
   const res = await updateAccountState(undefined, accountId, id, { newState, category, description });
   if (!res) throw new Error('Account not found');
 
-  return { success: true, accountId: id, backendState: newState };
+  return {
+    success: true,
+    accountId: id,
+    backendState: newState,
+    presentationCategory: category,
+    statusDescription: description
+  };
 }
 
 /**

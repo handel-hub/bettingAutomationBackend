@@ -95,6 +95,9 @@ test('End-to-End Integration Flow: Auth -> Machine Registration -> Full Auth -> 
 
 after(async () => {
   if (httpServer.listening) {
+    if (typeof httpServer.closeAllConnections === 'function') {
+      httpServer.closeAllConnections();
+    }
     await new Promise((resolve) => httpServer.close(resolve));
   }
   await closePool();

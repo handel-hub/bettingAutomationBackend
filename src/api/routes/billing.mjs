@@ -4,7 +4,8 @@ import { operatorAuth } from '../middleware/operator-auth.mjs';
 import {
   getBillingSnapshot,
   cancelSubscription,
-  resumeSubscription
+  resumeSubscription,
+  applyPaymentSuccess
 } from '../../domain/billing/service.mjs';
 import { getSubscriptionPlansCatalog } from '../../domain/plans/service.mjs';
 import { initiateCheckout } from '../../domain/payment/service.mjs';
@@ -56,7 +57,7 @@ async function handleCheckout(req, res, next) {
     const checkoutUrl = await initiateCheckout(
       accountId,
       resolvedPlanId,
-      returnUrl || 'https://app.bettingautomation.io/billing/return',
+      returnUrl || 'http://localhost:3000/workspace/billing',
       idempotencyKey.toString(),
       interval
     );
@@ -84,16 +85,59 @@ async function handleCheckout(req, res, next) {
 router.post('/checkout', operatorAuth, handleCheckout);
 router.post('/checkout/initialize', operatorAuth, handleCheckout);
 
-// Verification handler supporting /checkout/verify and /verify
+// Verification handler supporting /checkout/verify and /verify with dual-path instant activation
 async function handleVerify(req, res, next) {
   try {
     // @ts-ignore
     const accountId = req.accountId;
     const { reference } = req.body;
 
+    if (!reference) {
+      return res.status(400).json({ error: 'Missing transaction reference' });
+    }
+
     const provider = getProvider();
+    let tx = null;
     if (provider.verifyTransaction) {
-      await provider.verifyTransaction(reference);
+      tx = await provider.verifyTransaction(reference);
+    }
+
+    // Determine verification success
+    const isSuccess = tx && (tx.status === 'success' || tx.status === true) &&
+      (!tx.data || tx.data.status === 'successful' || !tx.data.status);
+
+    if (isSuccess && accountId) {
+      const txMeta = tx.data?.meta || tx.data?.metadata || {};
+      
+      // Tenant isolation guard: if account_id is embedded in payment metadata, verify it matches
+      if (txMeta.account_id && txMeta.account_id !== accountId) {
+        return res.status(403).json({ error: 'Transaction belongs to a different account' });
+      }
+
+      const planId = (txMeta.plan_id || req.body.planId || 'pro').toLowerCase();
+      const billingInterval = (txMeta.billing_interval || req.body.billingInterval || 'monthly').toLowerCase();
+      const amount = Number(tx.data?.charged_amount || tx.data?.amount || 10000);
+      const receiptUrl = tx.data?.receipt_url || null;
+
+      const pool = getPool();
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await applyPaymentSuccess(client, {
+          accountId,
+          planId,
+          billingInterval,
+          amount,
+          reference: String(reference),
+          receiptUrl
+        });
+        await client.query('COMMIT');
+      } catch (dbErr) {
+        await client.query('ROLLBACK');
+        throw dbErr;
+      } finally {
+        client.release();
+      }
     }
 
     const snapshot = await getBillingSnapshot(accountId);

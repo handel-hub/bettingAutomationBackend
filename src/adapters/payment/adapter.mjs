@@ -124,6 +124,11 @@ export function initializePaymentAdapter(providerOrSecretKey, options = {}) {
       },
       async getCustomer(accountId) {
         return null;
+      },
+      async verifyTransaction(transactionIdOrRef) {
+        const response = await paystack.transaction.verify({ reference: String(transactionIdOrRef) });
+        if (!response.status) throw new Error(response.message);
+        return response;
       }
     };
     setProvider(p);
@@ -153,6 +158,18 @@ export function initializePaymentAdapter(providerOrSecretKey, options = {}) {
     },
     async getCustomer(accountId) {
       return `cust_${accountId}`;
+    },
+    async verifyTransaction(transactionIdOrRef) {
+      return {
+        status: 'success',
+        data: {
+          id: transactionIdOrRef,
+          tx_ref: String(transactionIdOrRef),
+          status: 'successful',
+          amount: 10000,
+          currency: 'NGN'
+        }
+      };
     }
   };
   setProvider(stub);

@@ -204,7 +204,14 @@ export async function errorHandler(err, req, res, next) {
   let message = err.message || (matched ? matched.message : 'An internal error occurred');
 
   if (!matched) {
-    if (errText.includes('UNAUTHORIZED') || statusCode === 401) {
+    if (err.code === '23505' || errText.includes('unique constraint') || errText.includes('already exists')) {
+      statusCode = 409;
+      code = 'BE_STATE_ACCOUNT_EXISTS';
+      legacyCode = 'ACCOUNT_EXISTS';
+      category = 'CONFLICT';
+      retryable = false;
+      message = err.detail || 'A resource with these unique attributes already exists';
+    } else if (errText.includes('UNAUTHORIZED') || statusCode === 401) {
       statusCode = 401;
       code = 'BE_AUTH_UNAUTHORIZED';
       legacyCode = 'UNAUTHORIZED';

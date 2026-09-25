@@ -9,15 +9,24 @@ import { getPool } from '../../persistence/connection.mjs';
  */
 export async function insertAccount(client, data) {
   const runner = client || getPool();
-  const { accountId, name, platformDisplayName, accountUsername, ciphertext, nonce, tag, tags } = data;
+  const { id, accountId, name, platformDisplayName, accountUsername, ciphertext, nonce, tag, tags } = data;
 
   const insertRes = await runner.query(`
     INSERT INTO betting_accounts (
-      account_id, name, platform_display_name, account_username,
+      id, account_id, name, platform_display_name, account_username,
       account_password_encrypted, password_iv, password_tag, tags
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    ) VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9)
+    ON CONFLICT (account_id, lower(platform_display_name), lower(account_username))
+    DO UPDATE SET
+      name = EXCLUDED.name,
+      account_password_encrypted = EXCLUDED.account_password_encrypted,
+      password_iv = EXCLUDED.password_iv,
+      password_tag = EXCLUDED.password_tag,
+      tags = EXCLUDED.tags,
+      updated_at = now()
     RETURNING *
   `, [
+    id || null,
     accountId,
     name,
     platformDisplayName,

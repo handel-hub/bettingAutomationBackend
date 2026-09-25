@@ -62,6 +62,12 @@ export async function processOutboxEvent(event) {
       const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
       const { broadcast } = await import('../websocket/server.mjs');
       const targetAccountId = payload.scope === 'ACCOUNT' ? payload.targetId : null;
+      broadcast('LICENSE_REVOKED', {
+        scope: payload.scope,
+        targetId: payload.targetId,
+        reason: payload.reason,
+        timestamp: new Date().toISOString()
+      }, targetAccountId);
       broadcast('revocation:notice', {
         scope: payload.scope,
         targetId: payload.targetId,
@@ -72,6 +78,15 @@ export async function processOutboxEvent(event) {
     } else if (event.event_type === 'SUBSCRIPTION_EXPIRED') {
       const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
       const { broadcast } = await import('../websocket/server.mjs');
+      broadcast('SUBSCRIPTION_STATUS_CHANGED', {
+        subscriptionId: payload.subscriptionId,
+        accountId: payload.accountId,
+        subscription: {
+          planId: 'pro',
+          status: 'EXPIRED'
+        },
+        timestamp: new Date().toISOString()
+      }, payload.accountId);
       broadcast('subscription:expired', {
         subscriptionId: payload.subscriptionId,
         accountId: payload.accountId,
@@ -95,52 +110,8 @@ export async function processOutboxEvent(event) {
         if (accountId) {
           const planId = payload.data?.meta?.plan_id || payload.data?.metadata?.plan_id || payload.plan_id || 'PRO';
           const ref = payload.data?.tx_ref || payload.data?.reference || `ref-${Date.now()}`;
+          const billingInterval = (payload.data?.meta?.billing_interval || payload.data?.metadata?.billing_interval || 'monthly').toLowerCase();
           
-          // Fetch entitlements for capabilities & limits
-          let capabilities = ['CAP_AUTOMATION_START', 'CAP_AUTOMATION_STOP', 'CAP_FILE_UPLOAD', 'CAP_TACTICAL_BET', 'CAP_CASH_OUT'];
-          let limits = { max_machines: 5, max_concurrent_browsers: 5, risk_tier: 'LOW' };
-          try {
-            const entRes = await client.query('SELECT capabilities, limits FROM plan_entitlements WHERE plan_id = $1', [planId]);
-            if (entRes.rows.length > 0) {
-              capabilities = entRes.rows[0].capabilities || capabilities;
-              limits = entRes.rows[0].limits || limits;
-            }
-          } catch (e) {
-            // Fallback
-          }
-          
-          // 1. Ensure subscription row exists and is ACTIVE
-          const subCheck = await client.query('SELECT subscription_id FROM subscriptions WHERE account_id = $1', [accountId]);
-          if (subCheck.rows.length > 0) {
-            await client.query(
-              "UPDATE subscriptions SET status = 'ACTIVE', plan_id = $1, current_period_end = now() + interval '30 days', updated_at = now() WHERE account_id = $2",
-              [planId, accountId]
-            );
-          } else {
-            const providerSubId = payload.data?.subscription_code || payload.data?.flw_ref || `sub-${ref}`;
-            await client.query(`
-              INSERT INTO subscriptions (account_id, provider_subscription_id, plan_id, status, current_period_start, current_period_end)
-              VALUES ($1, $2, $3, 'ACTIVE', now(), now() + interval '30 days')
-            `, [accountId, providerSubId, planId]);
-          }
-          
-          // 2. Ensure license row exists and is VALID
-          const licCheck = await client.query('SELECT license_id FROM licenses WHERE account_id = $1', [accountId]);
-          if (licCheck.rows.length > 0) {
-            await client.query(`
-              UPDATE licenses 
-              SET status = 'VALID', plan_id = $1, capabilities = $2, limits = $3, expires_at = now() + interval '30 days',
-                  license_revision = license_revision + 1, updated_at = now()
-              WHERE account_id = $4
-            `, [planId, JSON.stringify(capabilities), JSON.stringify(limits), accountId]);
-          } else {
-            await client.query(`
-              INSERT INTO licenses (account_id, plan_id, status, capabilities, limits, issued_at, expires_at, license_revision)
-              VALUES ($1, $2, 'VALID', $3, $4, now(), now() + interval '30 days', 1)
-            `, [accountId, planId, JSON.stringify(capabilities), JSON.stringify(limits)]);
-          }
-
-          // 3. Persist invoice record in invoices table with normalized currency amount and statutory VAT
           let majorAmount;
           if (isFlw) {
             majorAmount = Number(payload.data?.charged_amount || payload.data?.amount || 10000);
@@ -148,29 +119,18 @@ export async function processOutboxEvent(event) {
             const rawAmount = payload.data?.amount || 1000000;
             majorAmount = (typeof rawAmount === 'number' && rawAmount >= 100) ? (rawAmount / 100) : rawAmount;
           }
-          const invId = `inv-${ref}`;
-          const taxRate = 0.075;
-          const subtotal = Math.round((majorAmount / (1 + taxRate)) * 100) / 100;
-          const taxAmount = Math.round((majorAmount - subtotal) * 100) / 100;
-          const billingInterval = payload.data?.meta?.billing_interval || payload.data?.metadata?.billing_interval || 'monthly';
-          const planNameResolved = planId ? (planId.charAt(0).toUpperCase() + planId.slice(1).toLowerCase()) : 'Pro';
 
-          await client.query(`
-            INSERT INTO invoices (
-              id, account_id, reference, amount, currency, status, paid_at, receipt_url,
-              subtotal, tax_amount, tax_rate, plan_name, billing_interval, currency_symbol
-            )
-            VALUES ($1, $2, $3, $4, 'NGN', 'Paid', now(), $5, $6, $7, $8, $9, $10, '₦')
-            ON CONFLICT (id) DO UPDATE SET
-              status = 'Paid',
-              paid_at = now(),
-              subtotal = EXCLUDED.subtotal,
-              tax_amount = EXCLUDED.tax_amount,
-              tax_rate = EXCLUDED.tax_rate,
-              plan_name = EXCLUDED.plan_name,
-              billing_interval = EXCLUDED.billing_interval,
-              currency_symbol = EXCLUDED.currency_symbol
-          `, [invId, accountId, ref, majorAmount, payload.data?.receipt_url || null, subtotal, taxAmount, taxRate, planNameResolved, billingInterval]);
+          const providerSubId = payload.data?.subscription_code || payload.data?.flw_ref || `sub-${ref}`;
+          const { applyPaymentSuccess } = await import('../domain/billing/service.mjs');
+          await applyPaymentSuccess(client, {
+            accountId,
+            planId,
+            billingInterval,
+            amount: majorAmount,
+            reference: ref,
+            receiptUrl: payload.data?.receipt_url || null,
+            providerSubId
+          });
         }
       } else if (
         event.event_type === 'charge.failed' || 
@@ -207,6 +167,20 @@ export async function processOutboxEvent(event) {
               channel: payload.data?.channel
             }
           });
+
+          // Broadcast to connected ACP / UI instances
+          try {
+            const { broadcast } = await import('../websocket/server.mjs');
+            broadcast('SUBSCRIPTION_STATUS_CHANGED', {
+              accountId,
+              subscription: {
+                status: 'PAST_DUE'
+              },
+              timestamp: new Date().toISOString()
+            }, accountId);
+          } catch (wsErr) {
+            // Non-critical if websocket is not active
+          }
         }
       }
     }

@@ -51,25 +51,28 @@ router.put('/config/:category', handleConfigUpdate);
 router.post('/config/:category', handleConfigUpdate);
 router.post('/config/global/:category', handleConfigUpdate);
 
-// POST /api/v1/automation/accounts/:id/bet-cycle
-router.post('/accounts/:id/bet-cycle', async (req, res, next) => {
+// POST & PATCH /api/v1/automation/accounts/:id/bet-cycle
+const handleToggleBetCycle = async (req, res, next) => {
   try {
     // @ts-ignore
     const accountId = req.accountId;
     const { enabled } = req.body;
-    const result = await toggleBetCycle(accountId, req.params.id, Boolean(enabled));
+    const isEnabled = enabled === true || enabled === 'ACTIVATE' || enabled === 'true';
+    const result = await toggleBetCycle(accountId, req.params.id, isEnabled);
 
     broadcast('automation:delta', {
       type: 'ACCOUNT_UPDATED',
       accountId: req.params.id,
-      partialSnapshot: { betCycleEnabled: Boolean(enabled) }
+      partialSnapshot: { betCycleEnabled: isEnabled }
     });
 
     res.json(result);
   } catch (err) {
     next(err);
   }
-});
+};
+router.post('/accounts/:id/bet-cycle', handleToggleBetCycle);
+router.patch('/accounts/:id/bet-cycle', handleToggleBetCycle);
 
 // POST /api/v1/automation/accounts/:id/override
 router.post('/accounts/:id/override', async (req, res, next) => {

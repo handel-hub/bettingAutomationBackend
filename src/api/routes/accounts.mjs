@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 import { Router } from 'express';
 import { operatorAuth } from '../middleware/operator-auth.mjs';
 import {
@@ -39,9 +39,10 @@ router.post('/', async (req, res, next) => {
   try {
     // @ts-ignore
     const accountId = req.accountId;
-    const { name, platformDisplayName, accountUsername, accountPassword, tags } = req.body;
+    const { id, name, platformDisplayName, accountUsername, accountPassword, tags } = req.body;
 
     const created = await createBettingAccount(accountId, {
+      id,
       name,
       platformDisplayName,
       accountUsername,
@@ -49,11 +50,11 @@ router.post('/', async (req, res, next) => {
       tags
     });
 
-    // Broadcast account delta
+    // Broadcast account delta with target accountId for monotonic sequence numbers
     broadcast('accounts:delta', {
       type: 'ACCOUNT_CREATED',
       partialSnapshot: created
-    });
+    }, accountId);
 
     res.status(201).json(created);
   } catch (err) {
@@ -82,13 +83,14 @@ router.post('/:id/action', async (req, res, next) => {
 
     const result = await executeAccountAction(accountId, req.params.id, type);
 
-    // Broadcast update
+    // Broadcast update with target accountId and full delta metadata
     broadcast('accounts:delta', {
       type: 'ACCOUNT_STATUS_CHANGED',
       accountId: req.params.id,
       backendState: result.backendState,
-      presentationCategory: result.presentationCategory
-    });
+      presentationCategory: result.presentationCategory,
+      statusDescription: result.statusDescription
+    }, accountId);
 
     res.json(result);
   } catch (err) {
@@ -108,7 +110,7 @@ router.post('/bulk-action', async (req, res, next) => {
     broadcast('accounts:delta', {
       type: 'BULK_OPERATION_RESULT',
       result
-    });
+    }, accountId);
 
     res.json(result);
   } catch (err) {

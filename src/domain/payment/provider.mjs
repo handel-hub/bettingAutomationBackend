@@ -9,6 +9,7 @@
  * @property {(payload: string, signature: string) => boolean} verifyWebhookSignature
  * @property {(email: string) => Promise<string>} createCustomer
  * @property {(accountId: string) => Promise<string | null>} getCustomer
+ * @property {(transactionIdOrRef: string | number) => Promise<any>} [verifyTransaction]
  */
 
 /** @type {PaymentProvider} */

@@ -279,6 +279,9 @@ after(async () => {
   const pool = getPool();
   await pool.query("DELETE FROM machines WHERE installation_id LIKE 'test-inst-domains%'");
   if (httpServer.listening) {
+    if (typeof httpServer.closeAllConnections === 'function') {
+      httpServer.closeAllConnections();
+    }
     await new Promise((resolve) => httpServer.close(resolve));
   }
   await closePool();

@@ -166,10 +166,12 @@ export class FlutterwaveAdapter {
 
   /**
    * Verify a transaction on Flutterwave v3
-   * @param {string | number} transactionId 
+   * Supports both numeric transaction IDs (GET /v3/transactions/:id/verify)
+   * and string transaction references (GET /v3/transactions/verify_by_reference?tx_ref=:ref).
+   * @param {string | number} transactionIdOrRef 
    * @returns {Promise<any>}
    */
-  async verifyTransaction(transactionId) {
+  async verifyTransaction(transactionIdOrRef) {
     if (
       !this.secretKey ||
       this.secretKey.includes('mock') ||
@@ -178,7 +180,8 @@ export class FlutterwaveAdapter {
       return {
         status: 'success',
         data: {
-          id: transactionId,
+          id: transactionIdOrRef,
+          tx_ref: String(transactionIdOrRef),
           status: 'successful',
           amount: 10000,
           currency: 'NGN'
@@ -186,7 +189,13 @@ export class FlutterwaveAdapter {
       };
     }
 
-    const res = await fetch(`${this.baseUrl}/transactions/${transactionId}/verify`, {
+    const paramStr = String(transactionIdOrRef).trim();
+    const isReference = isNaN(Number(paramStr)) || paramStr.startsWith('flw_') || paramStr.startsWith('FLW');
+    const verifyUrl = isReference
+      ? `${this.baseUrl}/transactions/verify_by_reference?tx_ref=${encodeURIComponent(paramStr)}`
+      : `${this.baseUrl}/transactions/${paramStr}/verify`;
+
+    const res = await fetch(verifyUrl, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${this.secretKey}`,

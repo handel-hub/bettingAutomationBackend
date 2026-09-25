@@ -196,3 +196,20 @@ export function getConnectedClientCount() {
   return wssInstance ? wssInstance.clients.size : 0;
 }
 
+/**
+ * Terminate all connected clients and close the WebSocket server instance.
+ */
+export function closeWebSocketServer() {
+  if (wssInstance) {
+    for (const client of wssInstance.clients) {
+      try {
+        client.terminate();
+      } catch { /* ignore */ }
+    }
+    try {
+      wssInstance.close();
+    } catch { /* ignore */ }
+    wssInstance = null;
+  }
+}
+

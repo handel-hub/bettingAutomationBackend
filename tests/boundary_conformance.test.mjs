@@ -258,6 +258,9 @@ after(async () => {
   await pool.query('DELETE FROM machines WHERE machine_id = $1', [testMachineId]);
   await pool.query('DELETE FROM sessions WHERE session_id = $1', [testSessionId]);
   if (httpServer.listening) {
+    if (typeof httpServer.closeAllConnections === 'function') {
+      httpServer.closeAllConnections();
+    }
     await new Promise((resolve) => httpServer.close(resolve));
   }
   await closePool();
