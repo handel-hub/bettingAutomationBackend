@@ -79,18 +79,18 @@ export async function processOutboxEvent(event) {
 
   return runWithContext(context, async () => {
     return withTransaction('READ COMMITTED', async (client) => {
-      if (event.event_type === 'REVOCATION_NOTICE') {
+      if (event.event_type === 'REVOCATION_NOTICE' || event.event_type === 'LICENSE_REVOKED') {
         const { broadcast } = await import('../websocket/server.mjs');
-        const targetAccountId = payload.scope === 'ACCOUNT' ? payload.targetId : null;
+        const targetAccountId = payload.scope === 'ACCOUNT' ? payload.targetId : (payload.accountId || null);
         broadcast('LICENSE_REVOKED', {
-          scope: payload.scope,
-          targetId: payload.targetId,
+          scope: payload.scope || 'LICENSE',
+          targetId: payload.targetId || payload.accountId,
           reason: payload.reason,
           timestamp: new Date().toISOString()
         }, targetAccountId);
         broadcast('revocation:notice', {
-          scope: payload.scope,
-          targetId: payload.targetId,
+          scope: payload.scope || 'LICENSE',
+          targetId: payload.targetId || payload.accountId,
           reason: payload.reason,
           timestamp: new Date().toISOString()
         }, targetAccountId);
