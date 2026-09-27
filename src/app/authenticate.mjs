@@ -87,8 +87,30 @@ export async function authenticate(email, password, machineId, protocolVersion, 
         const machine = machineRes.rows[0];
         actualMachineId = machine.machine_id;
 
-        // If machine was registered during cold-boot without an account, bind it now
+        // If machine was registered during cold-boot without an account, bind it now (enforce seat limit)
         if (!machine.account_id) {
+          // Row-lock account to prevent concurrent seat limit bypass (CAN-10)
+          await client.query('SELECT account_id FROM accounts WHERE account_id = $1 FOR UPDATE', [account.account_id]);
+
+          const licenseRes = await client.query(
+            "SELECT limits FROM licenses WHERE account_id = $1 AND status = 'VALID' ORDER BY issued_at DESC LIMIT 1",
+            [account.account_id]
+          );
+          const maxMachines = licenseRes.rows[0]?.limits?.max_machines || 5;
+          const countRes = await client.query(
+            "SELECT count(*)::int as count FROM machines WHERE account_id = $1 AND status != 'REVOKED'",
+            [account.account_id]
+          );
+          const activeMachineCount = countRes.rows[0]?.count || 0;
+          if (activeMachineCount >= maxMachines) {
+            const err = new Error(`SEAT_LIMIT_EXCEEDED: Maximum ${maxMachines} active machines allowed`);
+            // @ts-ignore
+            err.status = 403;
+            // @ts-ignore
+            err.code = 'SEAT_LIMIT_EXCEEDED';
+            throw err;
+          }
+
           await client.query(
             'UPDATE machines SET account_id = $1, updated_at = now() WHERE machine_id = $2',
             [account.account_id, actualMachineId]

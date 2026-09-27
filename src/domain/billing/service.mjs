@@ -188,15 +188,25 @@ export async function applyPaymentSuccess(client, {
   }
 
   // 1. Ensure subscription row exists and is ACTIVE
-  const subCheck = await runner.query('SELECT subscription_id FROM subscriptions WHERE account_id = $1', [accountId]);
+  const subCheck = await runner.query('SELECT subscription_id FROM subscriptions WHERE account_id = $1 ORDER BY current_period_end DESC, created_at DESC LIMIT 1', [accountId]);
   let subId;
   if (subCheck.rows.length > 0) {
     subId = subCheck.rows[0].subscription_id;
+    // Expire any other active subscriptions for this account to preserve partial unique index
     await runner.query(
-      `UPDATE subscriptions SET status = 'ACTIVE', plan_id = $1, current_period_end = now() + interval '${periodInterval}', updated_at = now() WHERE account_id = $2`,
-      [effectivePlanId, accountId]
+      `UPDATE subscriptions SET status = 'EXPIRED', updated_at = now() WHERE account_id = $1 AND status = 'ACTIVE' AND subscription_id != $2`,
+      [accountId, subId]
+    );
+    await runner.query(
+      `UPDATE subscriptions SET status = 'ACTIVE', plan_id = $1, current_period_end = now() + interval '${periodInterval}', updated_at = now() WHERE subscription_id = $2`,
+      [effectivePlanId, subId]
     );
   } else {
+    // Expire any existing active subscription before insert
+    await runner.query(
+      `UPDATE subscriptions SET status = 'EXPIRED', updated_at = now() WHERE account_id = $1 AND status = 'ACTIVE'`,
+      [accountId]
+    );
     const subCode = providerSubId || `sub-${ref}`;
     subId = subCode;
     await runner.query(`
@@ -207,16 +217,26 @@ export async function applyPaymentSuccess(client, {
 
   // 2. Ensure license row exists and is VALID
   let licenseKey = `lic-${accountId}`;
-  const licCheck = await runner.query('SELECT license_id FROM licenses WHERE account_id = $1', [accountId]);
+  const licCheck = await runner.query('SELECT license_id FROM licenses WHERE account_id = $1 ORDER BY expires_at DESC NULLS LAST, created_at DESC LIMIT 1', [accountId]);
   if (licCheck.rows.length > 0) {
     licenseKey = licCheck.rows[0].license_id || licenseKey;
+    // Expire any other valid licenses for this account to preserve partial unique index
+    await runner.query(
+      `UPDATE licenses SET status = 'EXPIRED', updated_at = now() WHERE account_id = $1 AND status = 'VALID' AND license_id != $2`,
+      [accountId, licenseKey]
+    );
     await runner.query(`
       UPDATE licenses 
       SET status = 'VALID', plan_id = $1, capabilities = $2, limits = $3, expires_at = now() + interval '${periodInterval}',
           license_revision = license_revision + 1, updated_at = now()
-      WHERE account_id = $4
-    `, [effectivePlanId, JSON.stringify(capabilities), JSON.stringify(limits), accountId]);
+      WHERE license_id = $4
+    `, [effectivePlanId, JSON.stringify(capabilities), JSON.stringify(limits), licenseKey]);
   } else {
+    // Expire any existing valid license before insert
+    await runner.query(
+      `UPDATE licenses SET status = 'EXPIRED', updated_at = now() WHERE account_id = $1 AND status = 'VALID'`,
+      [accountId]
+    );
     await runner.query(`
       INSERT INTO licenses (account_id, plan_id, status, capabilities, limits, issued_at, expires_at, license_revision)
       VALUES ($1, $2, 'VALID', $3, $4, now(), now() + interval '${periodInterval}', 1)

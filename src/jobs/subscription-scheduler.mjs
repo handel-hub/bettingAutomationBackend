@@ -10,7 +10,7 @@ export async function scheduleSubscriptions(client) {
   const res = await client.query(`
     UPDATE subscriptions 
     SET status = 'EXPIRED' 
-    WHERE status = 'ACTIVE' 
+    WHERE status IN ('ACTIVE', 'CANCELLED', 'PAST_DUE') 
       AND current_period_end < now()
     RETURNING subscription_id, account_id
   `);
@@ -38,6 +38,13 @@ export async function scheduleSubscriptions(client) {
         VALUES ('SUBSCRIPTION_EXPIRED', $1, $2)
         ON CONFLICT (idempotency_key) DO NOTHING
       `, [JSON.stringify({ subscriptionId: sub.subscription_id, accountId: sub.account_id }), `sub-exp-${sub.subscription_id}`]);
+
+      // 4. Enqueue LICENSE_REVOKED for authoritative Control Plane enforcement (DEF-11 / CAN-11)
+      await client.query(`
+        INSERT INTO outbox_events (event_type, payload, idempotency_key)
+        VALUES ('LICENSE_REVOKED', $1, $2)
+        ON CONFLICT (idempotency_key) DO NOTHING
+      `, [JSON.stringify({ scope: 'LICENSE', targetId: sub.account_id, accountId: sub.account_id, subscriptionId: sub.subscription_id, reason: 'SUBSCRIPTION_EXPIRED' }), `lic-rev-${sub.subscription_id}`]);
     }
   }
 }
