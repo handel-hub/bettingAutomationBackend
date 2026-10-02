@@ -11,8 +11,14 @@ const router = Router();
 router.post('/checkout', async (req, res, next) => {
   try {
     // In reality, authenticate the user to get accountId
-    const { accountId, planId, returnUrl } = req.body;
-    const idempotencyKey = req.headers['idempotency-key'] || `chk-${Date.now()}`;
+    const { accountId, planId, returnUrl } = req.body || {};
+    const idempotencyKey = req.headers['idempotency-key'] || req.body?.idempotencyKey;
+    if (!idempotencyKey) {
+      return res.status(400).json({
+        code: 'BE_VALIDATION_MISSING_IDEMPOTENCY_KEY',
+        error: 'Missing required Idempotency-Key header for checkout request'
+      });
+    }
     
     if (!accountId || !planId) {
       return res.status(400).json({ error: 'Missing accountId or planId' });

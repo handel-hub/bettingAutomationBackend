@@ -64,7 +64,7 @@ const handleToggleBetCycle = async (req, res, next) => {
       type: 'ACCOUNT_UPDATED',
       accountId: req.params.id,
       partialSnapshot: { betCycleEnabled: isEnabled }
-    });
+    }, accountId);
 
     res.json(result);
   } catch (err) {

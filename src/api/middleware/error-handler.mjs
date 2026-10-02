@@ -66,6 +66,14 @@ const ERROR_TAXONOMY = {
     retryable: false,
     message: 'Session or authorization lease has been revoked'
   },
+  CORS_ORIGIN_DENIED: {
+    status: 403,
+    code: 'BE_AUTH_CORS_ORIGIN_DENIED',
+    legacyCode: 'CORS_ORIGIN_DENIED',
+    category: 'AUTHENTICATION',
+    retryable: false,
+    message: 'Origin not allowed by CORS policy'
+  },
   MACHINE_NOT_FOUND: {
     status: 403,
     code: 'BE_AUTH_MACHINE_NOT_FOUND',

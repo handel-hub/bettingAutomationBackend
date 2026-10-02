@@ -210,9 +210,26 @@ test('Target Architecture & Contract Specification Conformance Suite', async (t)
 
   // 6. Unified Checkout Contract (Section 8.1 #13 / INT-BILL-CHK-01)
   await t.test('6. POST /api/v1/billing/checkout: Structured contract response with dynamic pricing', async () => {
-    const chkRes = await fetch(`${BASE_URL}/billing/checkout`, {
+    // 6a. Rejects missing Idempotency-Key with 400 BE_VALIDATION_MISSING_IDEMPOTENCY_KEY
+    const rejectRes = await fetch(`${BASE_URL}/billing/checkout`, {
       method: 'POST',
       headers: authHeaders,
+      body: JSON.stringify({
+        planId: 'starter',
+        billingInterval: 'annual'
+      })
+    });
+    assert.strictEqual(rejectRes.status, 400);
+    const rejectData = await rejectRes.json();
+    assert.strictEqual(rejectData.code, 'BE_VALIDATION_MISSING_IDEMPOTENCY_KEY');
+
+    // 6b. Accepts valid Idempotency-Key and returns contract payload
+    const chkRes = await fetch(`${BASE_URL}/billing/checkout`, {
+      method: 'POST',
+      headers: {
+        ...authHeaders,
+        'Idempotency-Key': `chk-conf-${Date.now()}`
+      },
       body: JSON.stringify({
         planId: 'starter',
         billingInterval: 'annual'
@@ -317,6 +334,186 @@ test('Target Architecture & Contract Specification Conformance Suite', async (t)
       assert.strictEqual(typeof firstAction.disabled, 'boolean');
       assert.ok(firstAction.variant, 'Action must have variant');
     }
+  });
+
+  // 10. CORS Policy Enforcement
+  await t.test('10. CORS Policy: Permits allowed console origin and rejects unauthorized origins', async () => {
+    // 10a. Allowed origin permits preflight and access
+    const allowedRes = await fetch(`${BASE_URL}/platforms`, {
+      headers: {
+        ...authHeaders,
+        'Origin': 'https://console.bettingautomation.io'
+      }
+    });
+    assert.strictEqual(allowedRes.status, 200);
+    assert.strictEqual(allowedRes.headers.get('access-control-allow-origin'), 'https://console.bettingautomation.io');
+
+    // 10b. Unauthorized foreign origin rejected with 403 BE_AUTH_CORS_ORIGIN_DENIED
+    const deniedRes = await fetch(`${BASE_URL}/platforms`, {
+      headers: {
+        ...authHeaders,
+        'Origin': 'https://malicious-phishing-site.com'
+      }
+    });
+    assert.strictEqual(deniedRes.status, 403);
+    const deniedData = await deniedRes.json();
+    assert.strictEqual(deniedData.error.code, 'BE_AUTH_CORS_ORIGIN_DENIED');
+  });
+
+  // 11. Security Hardening: Payment Amount Verification against Plan Pricing (Flaw 3)
+  await t.test('11. Security Hardening: POST /api/v1/billing/checkout/verify rejects insufficient payment amount', async () => {
+    const { getProvider, setProvider } = await import('../src/domain/payment/provider.mjs');
+    const originalProvider = getProvider();
+
+    // 11a. Reject insufficient amount (₦10,000 for ₦25,000 Elite plan)
+    setProvider({
+      ...originalProvider,
+      async verifyTransaction(ref) {
+        return {
+          status: 'success',
+          data: {
+            id: ref,
+            status: 'successful',
+            amount: 10000,
+            currency: 'NGN'
+          }
+        };
+      }
+    });
+
+    try {
+      const spoofRes = await fetch(`${BASE_URL}/billing/checkout/verify`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          reference: `test_ref_spoof_${Date.now()}`,
+          planId: 'elite',
+          billingInterval: 'monthly'
+        })
+      });
+      assert.strictEqual(spoofRes.status, 400);
+      const spoofData = await spoofRes.json();
+      assert.strictEqual(spoofData.verified, false);
+      assert.ok(spoofData.error.includes('insufficient for requested plan'));
+    } finally {
+      setProvider(originalProvider);
+    }
+
+    // 11b. Accept sufficient amount (₦25,000 for ₦25,000 Elite plan)
+    setProvider({
+      ...originalProvider,
+      async verifyTransaction(ref) {
+        return {
+          status: 'success',
+          data: {
+            id: ref,
+            status: 'successful',
+            amount: 25000,
+            currency: 'NGN'
+          }
+        };
+      }
+    });
+
+    try {
+      const validRes = await fetch(`${BASE_URL}/billing/checkout/verify`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({
+          reference: `test_ref_valid_${Date.now()}`,
+          planId: 'elite',
+          billingInterval: 'monthly'
+        })
+      });
+      assert.strictEqual(validRes.status, 200);
+      const validData = await validRes.json();
+      assert.strictEqual(validData.verified, true);
+      assert.strictEqual(validData.status, 'Authorized');
+    } finally {
+      setProvider(originalProvider);
+    }
+  });
+
+  // 12. Security Hardening: Cross-Tenant WebSocket Broadcast Isolation (Flaw 4)
+  await t.test('12. Security Hardening: Broadcast with targetAccountId isolates events to intended tenant', async () => {
+    const { broadcast } = await import('../src/websocket/server.mjs');
+    const { WebSocket } = await import('ws');
+
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws/v1/events?session=${testSessionId}`);
+    
+    // Wait for the server to finish authenticating and sending initial app:state handshake
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('WebSocket handshake timeout')), 3000);
+      ws.on('message', (msg) => {
+        try {
+          const parsed = JSON.parse(msg.toString());
+          if (parsed.eventType === 'app:state' || parsed.topic === 'app:state') {
+            clearTimeout(timer);
+            resolve(null);
+          }
+        } catch {}
+      });
+      ws.on('error', reject);
+    });
+
+    const receivedOtherTenant = [];
+    const receivedMatchingTenant = [];
+
+    ws.on('message', (data) => {
+      try {
+        const evt = JSON.parse(data.toString());
+        if (evt.topic === 'test:foreign_tenant') {
+          receivedOtherTenant.push(evt);
+        }
+        if (evt.topic === 'test:own_tenant') {
+          receivedMatchingTenant.push(evt);
+        }
+      } catch {}
+    });
+
+    // Broadcast targeted to a different account ID
+    broadcast('test:foreign_tenant', { secret: 'cross-tenant-leak' }, 'different-account-uuid');
+    
+    // Broadcast targeted to the connected testAccountId
+    broadcast('test:own_tenant', { data: 'my-own-event' }, testAccountId);
+
+    // Wait a brief tick for socket delivery
+    await new Promise((r) => setTimeout(r, 200));
+
+    ws.close();
+
+    assert.strictEqual(receivedOtherTenant.length, 0, 'Must NOT receive events targeted to other accounts');
+    assert.strictEqual(receivedMatchingTenant.length, 1, 'Must receive events targeted to own account');
+  });
+
+  // 13. Security Hardening: Cross-Site WebSocket Hijacking (CSWSH) Origin Validation (Flaw 5)
+  await t.test('13. Security Hardening: WebSocket rejects unauthorized foreign Origin during handshake', async () => {
+    const { WebSocket } = await import('ws');
+
+    // Attempt connection from disallowed attacker origin
+    const attackerWs = new WebSocket(`ws://localhost:${PORT}/ws/v1/events?session=${testSessionId}`, {
+      headers: {
+        'Origin': 'https://attacker-cswsh.com'
+      }
+    });
+
+    const wasRejected = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try { attackerWs.terminate(); } catch {}
+        resolve(false);
+      }, 3000);
+
+      attackerWs.on('error', () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+      attackerWs.on('unexpected-response', (req, res) => {
+        clearTimeout(timer);
+        resolve(res.statusCode === 403);
+      });
+    });
+
+    assert.strictEqual(wasRejected, true, 'WebSocket connection from unauthorized origin must be rejected with 403');
   });
 });
 

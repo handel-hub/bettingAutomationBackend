@@ -41,8 +41,14 @@ async function handleCheckout(req, res, next) {
   try {
     // @ts-ignore
     const accountId = req.accountId;
-    const { planId, planName, billingInterval = 'monthly', returnUrl } = req.body;
-    const idempotencyKey = req.headers['idempotency-key'] || `chk-${Date.now()}`;
+    const idempotencyKey = req.headers['idempotency-key'] || req.body?.idempotencyKey;
+    if (!idempotencyKey) {
+      return res.status(400).json({
+        code: 'BE_VALIDATION_MISSING_IDEMPOTENCY_KEY',
+        error: 'Missing required Idempotency-Key header for checkout request'
+      });
+    }
+    const { planId, planName, billingInterval = 'monthly', returnUrl } = req.body || {};
     const targetPlanId = (planId || planName || 'pro').toLowerCase();
     const interval = (billingInterval || 'monthly').toLowerCase();
 
@@ -137,6 +143,19 @@ async function handleVerify(req, res, next) {
       const receiptUrl = tx.data?.receipt_url || null;
 
       const pool = getPool();
+      const planRes = await pool.query('SELECT * FROM subscription_plans WHERE LOWER(plan_id) = $1', [planId]);
+      const plan = planRes.rows[0];
+
+      if (plan) {
+        const expectedPrice = billingInterval === 'annual' ? Number(plan.annual_price) : Number(plan.monthly_price);
+        if (amount < expectedPrice) {
+          return res.status(400).json({
+            verified: false,
+            error: `Payment amount (${amount}) is insufficient for requested plan (${planId}: ${expectedPrice})`
+          });
+        }
+      }
+
       const client = await pool.connect();
       try {
         await client.query('BEGIN');

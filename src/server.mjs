@@ -37,12 +37,37 @@ import { initializeJobs } from './jobs/index.mjs';
 import { stopScheduler } from './jobs/scheduler.mjs';
 import { bootstrapDevAccounts } from './persistence/bootstrap.mjs';
 import { closePool } from './persistence/connection.mjs';
+import { isOriginAllowed } from './utils/cors.mjs';
 
 const app = express();
 const sysLogger = rootLogger.child({ component: 'Server' });
 
 app.use(requestTracer);
 app.use(helmet());
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (isOriginAllowed(origin)) {
+      return callback(null, true);
+    }
+    const err = new Error('CORS_ORIGIN_DENIED');
+    // @ts-ignore
+    err.status = 403;
+    return callback(err);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Idempotency-Key',
+    'x-session-id',
+    'x-machine-id',
+    'If-None-Match',
+    'x-idempotency-key'
+  ]
+}));
+
 app.use(express.json({
   verify: (req, res, buf) => {
     // @ts-ignore

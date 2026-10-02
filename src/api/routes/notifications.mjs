@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 import { Router } from 'express';
 import { operatorAuth } from '../middleware/operator-auth.mjs';
 import {
@@ -39,7 +39,7 @@ router.post('/', async (req, res, next) => {
     const accountId = req.accountId;
     const created = await createNotification(accountId, req.body);
 
-    broadcast('notifications:new', created);
+    broadcast('notifications:new', created, accountId);
 
     res.status(201).json(created);
   } catch (err) {

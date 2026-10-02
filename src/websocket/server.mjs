@@ -2,7 +2,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
 
 import { getPool } from '../persistence/connection.mjs';
-
+import { getSystemEpoch } from '../domain/system/epoch-store.mjs';
+import { isOriginAllowed } from '../utils/cors.mjs';
 import crypto from 'crypto';
 
 /** @type {WebSocketServer | null} */
@@ -25,14 +26,21 @@ export function getAccountSequence(accountId) {
 
 /**
  * Initialize the WebSocket Server on the provided HTTP server.
- * Mounts strictly on path /ws/v1/events.
+ * Mounts strictly on path /ws/v1/events with CSWSH Origin validation.
  * @param {import('http').Server} httpServer 
  * @returns {WebSocketServer}
  */
 export function initWebSocketServer(httpServer) {
   const wss = new WebSocketServer({
     server: httpServer,
-    path: '/ws/v1/events'
+    path: '/ws/v1/events',
+    verifyClient: (info, callback) => {
+      const origin = info.origin || info.req.headers.origin;
+      if (isOriginAllowed(origin)) {
+        return callback(true);
+      }
+      return callback(false, 403, 'Forbidden: Origin Not Allowed');
+    }
   });
   wssInstance = wss;
 
@@ -85,6 +93,7 @@ export function initWebSocketServer(httpServer) {
         eventType: 'app:state',
         topic: 'app:state',
         sequenceNumber: currentSeq,
+        server_epoch: getSystemEpoch(),
         timestamp: new Date().toISOString(),
         payload: {
           state: 'Authorized',
@@ -138,6 +147,7 @@ export function emitServerEvent(accountId, eventType, payload) {
     eventType,
     topic: eventType, // Backward-compatibility bridge
     sequenceNumber: nextSeq,
+    server_epoch: getSystemEpoch(),
     timestamp: new Date().toISOString(),
     payload
   };
@@ -176,6 +186,7 @@ export function broadcast(topic, payload, targetAccountId = null) {
     eventId: `evt_${crypto.randomUUID()}`,
     eventType: topic,
     topic,
+    server_epoch: getSystemEpoch(),
     timestamp: new Date().toISOString(),
     payload
   };

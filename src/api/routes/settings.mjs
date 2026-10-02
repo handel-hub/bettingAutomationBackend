@@ -1,4 +1,4 @@
-﻿// @ts-check
+// @ts-check
 import { Router } from 'express';
 import { operatorAuth } from '../middleware/operator-auth.mjs';
 import {
@@ -31,7 +31,7 @@ router.post('/intent', async (req, res, next) => {
 
     if (ack.status === 'ACCEPTED') {
       const fresh = await getSettingsSnapshot(accountId);
-      broadcast('settings:snapshot', fresh);
+      broadcast('settings:snapshot', fresh, accountId);
     }
 
     res.json(ack);

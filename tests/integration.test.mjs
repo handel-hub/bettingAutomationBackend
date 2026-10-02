@@ -77,7 +77,10 @@ test('End-to-End Integration Flow: Auth -> Machine Registration -> Full Auth -> 
   // 5. Payment Checkout Flow with Paystack
   const checkoutRes = await fetch(`${BASE_URL}/api/v1/payments/checkout`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'Idempotency-Key': `chk-integ-${Date.now()}`
+    },
     body: JSON.stringify({
       accountId: '9d627694-537d-4221-bafa-cf1f163c6bdc',
       planId: 'PRO',
