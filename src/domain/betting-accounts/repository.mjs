@@ -182,6 +182,52 @@ export async function batchDeleteAccounts(client, accountId, ids) {
 }
 
 /**
+ * Update details / credentials of a single betting account
+ * @param {import('pg').PoolClient | import('pg').Pool} [client]
+ * @param {string} accountId
+ * @param {string} id
+ * @param {{ name?: string, ciphertext?: string, nonce?: string, tag?: string, tags?: string[] }} fields
+ * @returns {Promise<any>}
+ */
+export async function updateAccountFields(client, accountId, id, fields) {
+  const runner = client || getPool();
+  const sets = [];
+  const params = [id, accountId];
+  let idx = 3;
+
+  if (fields.name) {
+    sets.push(`name = $${idx++}`);
+    params.push(fields.name);
+  }
+  if (fields.ciphertext && fields.nonce && fields.tag) {
+    sets.push(`account_password_encrypted = $${idx++}`);
+    params.push(fields.ciphertext);
+    sets.push(`password_iv = $${idx++}`);
+    params.push(fields.nonce);
+    sets.push(`password_tag = $${idx++}`);
+    params.push(fields.tag);
+  }
+  if (fields.tags) {
+    sets.push(`tags = $${idx++}`);
+    params.push(JSON.stringify(fields.tags));
+  }
+
+  if (sets.length === 0) {
+    const existing = await runner.query('SELECT * FROM betting_accounts WHERE id = $1 AND account_id = $2', [id, accountId]);
+    return existing.rows[0] || null;
+  }
+
+  sets.push('updated_at = now()');
+  const res = await runner.query(`
+    UPDATE betting_accounts
+    SET ${sets.join(', ')}
+    WHERE id = $1 AND account_id = $2
+    RETURNING *
+  `, params);
+  return res.rows[0] || null;
+}
+
+/**
  * Fetch encryption credentials for decryption
  * @param {import('pg').PoolClient | import('pg').Pool} [client]
  * @param {string} accountId

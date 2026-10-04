@@ -9,6 +9,7 @@ import {
   findAccountById,
   deleteAccount,
   updateAccountState,
+  updateAccountFields,
   getCredentialsForDecryption
 } from './repository.mjs';
 
@@ -363,6 +364,47 @@ export async function getDecryptedPassword(accountId, id) {
   const aad = Buffer.from(`${accountId}:${platform_display_name}:${account_username}`);
   const decryptedBuf = decrypt(getMasterVaultKey(), password_iv, account_password_encrypted, password_tag, aad);
   return decryptedBuf.toString('utf8');
+}
+
+export async function updateBettingAccount(accountId, id, updates) {
+  let ciphertext, nonce, tag;
+  if (updates.accountPassword) {
+    const existing = await findAccountById(undefined, accountId, id);
+    if (!existing) throw new Error('Betting account not found');
+    const aad = Buffer.from(`${accountId}:${existing.platform_display_name}:${existing.account_username}`);
+    const encrypted = encrypt(getMasterVaultKey(), Buffer.from(updates.accountPassword, 'utf8'), aad);
+    ciphertext = encrypted.ciphertext;
+    nonce = encrypted.nonce;
+    tag = encrypted.tag;
+  }
+
+  const updated = await updateAccountFields(undefined, accountId, id, {
+    name: updates.name,
+    ciphertext,
+    nonce,
+    tag,
+    tags: updates.tags
+  });
+
+  if (!updated) throw new Error('Betting account not found');
+
+  return {
+    id: updated.id,
+    name: updated.name,
+    platformDisplayName: updated.platform_display_name,
+    accountUsername: updated.account_username,
+    accountPassword: maskPassword(),
+    backendState: updated.backend_state,
+    presentationCategory: updated.presentation_category,
+    statusDescription: updated.status_description,
+    warningMessage: updated.warning_message,
+    isSelectable: updated.is_selectable,
+    availableActions: formatAccountActions(updated.available_actions, updated.backend_state),
+    pendingOperation: updated.pending_operation,
+    tags: updated.tags || [],
+    lastUpdated: updated.updated_at.toISOString(),
+    lastSynchronization: updated.last_synchronization ? updated.last_synchronization.toISOString() : new Date().toISOString()
+  };
 }
 
 export const getBettingAccountById = getBettingAccount;

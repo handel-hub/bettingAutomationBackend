@@ -4,6 +4,7 @@ import { operatorAuth } from '../middleware/operator-auth.mjs';
 import {
   listBettingAccounts,
   createBettingAccount,
+  updateBettingAccount,
   getBettingAccountById,
   executeAccountAction,
   executeBulkAction
@@ -69,6 +70,25 @@ router.get('/:id', async (req, res, next) => {
     const accountId = req.accountId;
     const details = await getBettingAccountById(accountId, req.params.id);
     res.json(details);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /api/v1/accounts/:id - Update account details / password
+router.patch('/:id', async (req, res, next) => {
+  try {
+    // @ts-ignore
+    const accountId = req.accountId;
+    const updated = await updateBettingAccount(accountId, req.params.id, req.body || {});
+
+    broadcast('accounts:delta', {
+      type: 'ACCOUNT_UPDATED',
+      accountId: req.params.id,
+      partialSnapshot: updated
+    }, accountId);
+
+    res.json(updated);
   } catch (err) {
     next(err);
   }
