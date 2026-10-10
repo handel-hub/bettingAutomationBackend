@@ -4,6 +4,7 @@ import {
   findByInstallationAndPublicKey,
   findClones,
   countActiveByAccount,
+  enforceSeatLimitWithDormancyReclamation,
   createMachine,
   createSessionState
 } from './repository.mjs';
@@ -92,8 +93,14 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
       );
       const maxMachines = licenseRes.rows[0]?.limits?.max_machines || 5;
       
-      const activeMachineCount = await countActiveByAccount(client, accountId);
-      if (activeMachineCount >= maxMachines) {
+      const seatCheck = await enforceSeatLimitWithDormancyReclamation(
+        client,
+        accountId,
+        maxMachines,
+        null,
+        process.env.DORMANT_MACHINE_THRESHOLD || '1 hour'
+      );
+      if (!seatCheck.allowed) {
         const err = new Error(`SEAT_LIMIT_EXCEEDED: Maximum ${maxMachines} active machines allowed`);
         // @ts-ignore
         err.status = 403;

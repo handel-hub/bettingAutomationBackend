@@ -1,8 +1,42 @@
 // @ts-check
 import { Router } from 'express';
 import { register } from '../../domain/machine/service.mjs';
+import { listMachinesByAccount, revokeMachine } from '../../domain/machine/repository.mjs';
+import { operatorAuth } from '../middleware/operator-auth.mjs';
+import { buildEnvelope } from '../../protocol/envelope.mjs';
 
 const router = Router();
+
+// GET /api/v1/machines - List registered machines for authenticated operator
+router.get('/', operatorAuth, async (req, res, next) => {
+  try {
+    // @ts-ignore
+    const accountId = req.accountId;
+    if (!accountId) {
+      return res.status(401).json({ error: 'UNAUTHORIZED', message: 'Authentication required' });
+    }
+    const machines = await listMachinesByAccount(null, accountId);
+    res.json({ machines });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /api/v1/machines/:machineId - Explicitly revoke a registered machine
+router.delete('/:machineId', operatorAuth, async (req, res, next) => {
+  try {
+    // @ts-ignore
+    const accountId = req.accountId;
+    if (!accountId) {
+      return res.status(401).json({ error: 'UNAUTHORIZED', message: 'Authentication required' });
+    }
+    const { machineId } = req.params;
+    await revokeMachine(null, machineId, accountId);
+    res.json({ success: true, machineId, status: 'REVOKED' });
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.post('/register', async (req, res, next) => {
   try {
@@ -19,9 +53,15 @@ router.post('/register', async (req, res, next) => {
     }
 
     const machine = await register(installationId, publicKeyHex, descriptor, selfSignature, sessionId);
-    res.json({
+    const responsePayload = {
       machineId: machine.machine_id,
       status: machine.status || 'REGISTERED'
+    };
+    const signedResponse = await buildEnvelope(responsePayload, 1);
+
+    res.json({
+      ...signedResponse,
+      ...responsePayload
     });
   } catch (err) {
     next(err);
@@ -29,3 +69,4 @@ router.post('/register', async (req, res, next) => {
 });
 
 export default router;
+

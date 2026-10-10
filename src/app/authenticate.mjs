@@ -4,8 +4,11 @@ import { getAccountByEmailForUpdate, updateAccountLockout } from '../domain/auth
 import { verifyCredentials } from '../domain/auth/service.mjs';
 import { verifyPassword } from '../crypto/hashing.mjs';
 import { getActiveLicenseForAuth } from '../domain/licensing/service.mjs';
+import { findLatestByAccount } from '../domain/licensing/repository.mjs';
 import { computeCapabilities } from '../domain/authorization/service.mjs';
 import { logEvent } from '../domain/audit/service.mjs';
+import { enforceSeatLimitWithDormancyReclamation } from '../domain/machine/repository.mjs';
+
 
 // Pre-computed fixed Argon2id hash to ensure constant-time verification when account is not found (defeats timing oracles)
 const DUMMY_ARGON2_HASH = '$argon2id$v=19$m=65536,t=3,p=1$PiOvQnUc2ju2CCzdXcmXDQ$acHHRJ5JhSWC4RAucwevZEeSNSP8Op886Y3b44q6gSM';
@@ -97,12 +100,14 @@ export async function authenticate(email, password, machineId, protocolVersion, 
             [account.account_id]
           );
           const maxMachines = licenseRes.rows[0]?.limits?.max_machines || 5;
-          const countRes = await client.query(
-            "SELECT count(*)::int as count FROM machines WHERE account_id = $1 AND status != 'REVOKED'",
-            [account.account_id]
+          const seatCheck = await enforceSeatLimitWithDormancyReclamation(
+            client,
+            account.account_id,
+            maxMachines,
+            actualMachineId,
+            process.env.DORMANT_MACHINE_THRESHOLD || '1 hour'
           );
-          const activeMachineCount = countRes.rows[0]?.count || 0;
-          if (activeMachineCount >= maxMachines) {
+          if (!seatCheck.allowed) {
             const err = new Error(`SEAT_LIMIT_EXCEEDED: Maximum ${maxMachines} active machines allowed`);
             // @ts-ignore
             err.status = 403;
@@ -156,14 +161,20 @@ export async function authenticate(email, password, machineId, protocolVersion, 
         
         // 6. Compute capabilities and create authorization record
         license = await getActiveLicenseForAuth(client, account.account_id, actualMachineId);
+        const latestLicense = license || await findLatestByAccount(client, account.account_id);
         capabilities = computeCapabilities(license);
         
+        const authStatus = license ? 'VALID' : 'REVOKED';
         const authInsertRes = await client.query(`
           INSERT INTO authorizations (session_id, account_id, license_id, status, capability_set, observed_license_revision, expires_at)
-          VALUES ($1, $2, $3, 'VALID', $4, $5, now() + interval '2 hours')
+          VALUES ($1, $2, $3, $4, $5, $6, now() + interval '2 hours')
           RETURNING authorization_id
-        `, [sessionId, account.account_id, license ? license.license_id : null, JSON.stringify(capabilities), license ? license.license_revision : 1]);
+        `, [sessionId, account.account_id, latestLicense ? latestLicense.license_id : null, authStatus, JSON.stringify(capabilities), latestLicense ? latestLicense.license_revision : 1]);
         authRecordId = authInsertRes.rows[0].authorization_id;
+        
+        if (!license && latestLicense) {
+          license = latestLicense;
+        }
         
         // Audit log for retired session if any
         if (updateOldSessRes.rows.length > 0) {
@@ -203,9 +214,10 @@ export async function authenticate(email, password, machineId, protocolVersion, 
       metadata: isPartial ? { partial_token: sessionId, presented_machine_id: machineId } : {}
     });
     
-    // Issue signed GraceToken if authenticated
+    // Issue signed GraceToken only if authenticated with a valid active license
     let graceToken = null;
-    if (!isPartial && actualMachineId) {
+    const hasValidLicense = Boolean(license && license.status === 'VALID' && (!license.expires_at || new Date(license.expires_at) > new Date()));
+    if (!isPartial && actualMachineId && hasValidLicense) {
       const { issueGraceToken } = await import('../domain/licensing/grace-token.mjs');
       const riskTier = license?.limits?.risk_tier || 'LOW_RISK';
       graceToken = await issueGraceToken(account.account_id, actualMachineId, capabilities, riskTier);
@@ -220,14 +232,15 @@ export async function authenticate(email, password, machineId, protocolVersion, 
       license: license ? {
         id: license.license_id,
         planId: license.plan_id,
-        status: license.status || 'VALID',
+        status: hasValidLicense ? 'VALID' : (license.status === 'REVOKED' ? 'REVOKED' : 'EXPIRED'),
         expiresAt: license.expires_at ? new Date(license.expires_at).toISOString() : null
       } : {
-        status: 'VALID',
-        planId: 'pro'
+        status: 'PAYMENT_REQUIRED',
+        planId: 'none'
       },
       capabilities,
       graceToken
     };
   });
 }
+
