@@ -31,6 +31,9 @@ after(async () => {
 });
 
 test('Flutterwave v3 Payment Gateway Test Suite', async (t) => {
+  process.env.NODE_ENV = 'test';
+  process.env.ALLOW_TEST_PAYMENT_STUB = 'true';
+
   const secretHash = 'flw_test_secret_hash_xyz_789';
   const secretKey = 'FLWSECK_TEST-mock-key-123';
   const flwAdapter = new FlutterwaveAdapter({
@@ -58,8 +61,8 @@ test('Flutterwave v3 Payment Gateway Test Suite', async (t) => {
     assert.strictEqual(flwAdapter.verifyWebhookSignature('', null), false);
   });
 
-  // 2. Checkout Session Link Generation with Major Units
-  await t.test('2. FlutterwaveAdapter: createCheckoutSession produces valid URL with major NGN units', async () => {
+  // 2. Checkout Session Link Generation with Major Units & Guard Verification
+  await t.test('2. FlutterwaveAdapter: createCheckoutSession produces valid URL in test stub mode and rejects mock keys when ALLOW_TEST_PAYMENT_STUB is disabled', async () => {
     const accountId = crypto.randomUUID();
     const planId = 'ENTERPRISE';
     const returnUrl = 'https://app.bettingautomation.io/billing/return';
@@ -68,6 +71,21 @@ test('Flutterwave v3 Payment Gateway Test Suite', async (t) => {
     assert.ok(checkoutUrl.startsWith('https://checkout.flutterwave.com/v3/hosted/pay/'));
     assert.ok(checkoutUrl.includes(`account=${accountId}`));
     assert.ok(checkoutUrl.includes(`plan=${planId}`));
+
+    // Verify guard when ALLOW_TEST_PAYMENT_STUB is disabled
+    try {
+      process.env.ALLOW_TEST_PAYMENT_STUB = 'false';
+      await assert.rejects(
+        () => flwAdapter.createCheckoutSession(accountId, planId, returnUrl),
+        /FlutterwaveAdapter mock checkout URL generation is forbidden/
+      );
+      assert.throws(
+        () => initializePaymentAdapter('stub'),
+        /Payment provider "stub" is forbidden/
+      );
+    } finally {
+      process.env.ALLOW_TEST_PAYMENT_STUB = 'true';
+    }
   });
 
   // 3. Multi-Provider Toggle Test
@@ -87,7 +105,7 @@ test('Flutterwave v3 Payment Gateway Test Suite', async (t) => {
     assert.strictEqual(typeof paystackProv.createCheckoutSession, 'function');
     assert.strictEqual(getProvider(), paystackProv);
 
-    // Switch to Stub
+    // Switch to Stub (allowed when NODE_ENV=test && ALLOW_TEST_PAYMENT_STUB=true)
     const stubProv = initializePaymentAdapter('stub');
     assert.strictEqual(typeof stubProv.createCheckoutSession, 'function');
     assert.strictEqual(getProvider(), stubProv);

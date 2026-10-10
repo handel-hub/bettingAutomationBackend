@@ -87,7 +87,14 @@ export async function getBillingSnapshot(accountId) {
     price: planPrice,
     currency: 'NGN',
     currencySymbol: '₦',
-    status: sub ? (sub.status === 'ACTIVE' ? 'Active' : (sub.status === 'PAST_DUE' ? 'Past_Due' : 'Cancelled')) : 'Payment_Required',
+    status: sub
+      ? (sub.status === 'ACTIVE'
+          ? 'Active'
+          : (sub.status === 'PAST_DUE'
+              ? 'Past_Due'
+              : (sub.status === 'EXPIRED' ? 'Payment_Required' : 'Cancelled')))
+      : 'Payment_Required',
+
     billingInterval,
     renewalDate: sub?.status === 'ACTIVE' ? sub.current_period_end : null,
     expirationDate: sub?.current_period_end || null,
@@ -297,6 +304,10 @@ export async function applyPaymentSuccess(client, {
   return {
     subscriptionId: subId,
     status: 'ACTIVE',
-    planId: normalizedPlanId
+    planId: normalizedPlanId,
+    licenseId: licenseKey,
+    licenseStatus: 'VALID',
+    capabilities,
+    limits
   };
 }

@@ -49,94 +49,108 @@ export function initializePaymentAdapter(providerOrSecretKey, options = {}) {
 
   // 2. Paystack Provider
   const paystackSecret = config.PAYSTACK_SECRET_KEY || config.secretKey || (typeof providerOrSecretKey === 'string' && providerOrSecretKey.startsWith('sk_') ? providerOrSecretKey : null);
-  if (providerType === 'paystack' && paystackSecret && paystackSecret.startsWith('sk_')) {
-    console.log('Initializing Paystack payment provider');
-    const paystack = new Paystack(paystackSecret);
+  if (providerType === 'paystack') {
+    if (!paystackSecret || !paystackSecret.startsWith('sk_')) {
+      const isTestStubAllowed = (config.NODE_ENV === 'test' || process.env.NODE_ENV === 'test') &&
+        (config.ALLOW_TEST_PAYMENT_STUB === 'true' || process.env.ALLOW_TEST_PAYMENT_STUB === 'true');
+      if (!isTestStubAllowed) {
+        throw new Error('Paystack payment provider requires a valid PAYSTACK_SECRET_KEY starting with "sk_"');
+      }
+    } else {
+      console.log('Initializing Paystack payment provider');
+      const paystack = new Paystack(paystackSecret);
 
-    const p = {
-      async createCheckoutSession(accountId, planId, returnUrl) {
-        let email = `${accountId}@bettingautomation.io`; 
-        let amount = 1000000; // ₦10,000 in Kobo default
-        
-        try {
-          const { findById } = await import('../../domain/account/repository.mjs');
-          const acc = await findById(undefined, accountId);
-          if (acc?.email) {
-            email = acc.email;
+      const p = {
+        async createCheckoutSession(accountId, planId, returnUrl) {
+          let email = `${accountId}@bettingautomation.io`; 
+          let amount = 1000000; // ₦10,000 in Kobo default
+          
+          try {
+            const { findById } = await import('../../domain/account/repository.mjs');
+            const acc = await findById(undefined, accountId);
+            if (acc?.email) {
+              email = acc.email;
+            }
+            
+            const { getPool } = await import('../../persistence/connection.mjs');
+            const pool = getPool();
+            const planRes = await pool.query('SELECT limits FROM plan_entitlements WHERE plan_id = $1', [planId]);
+            if (planRes.rows.length > 0 && planRes.rows[0].limits?.price) {
+              amount = Math.round(Number(planRes.rows[0].limits.price) * 100);
+            }
+          } catch {
+            // Fallback
           }
           
-          const { getPool } = await import('../../persistence/connection.mjs');
-          const pool = getPool();
-          const planRes = await pool.query('SELECT limits FROM plan_entitlements WHERE plan_id = $1', [planId]);
-          if (planRes.rows.length > 0 && planRes.rows[0].limits?.price) {
-            amount = Math.round(Number(planRes.rows[0].limits.price) * 100);
+          const response = await paystack.transaction.initialize({
+            email,
+            amount,
+            callback_url: returnUrl,
+            metadata: {
+              account_id: accountId,
+              plan_id: planId
+            }
+          });
+          
+          if (!response.status) {
+            throw new Error(`Paystack error: ${response.message}`);
           }
-        } catch {
-          // Fallback
+          
+          return response.data.authorization_url;
+        },
+        async createSubscription(customerId, planId) {
+          const response = await paystack.subscription.create({
+            customer: customerId,
+            plan: planId
+          });
+          if (!response.status) throw new Error(response.message);
+          return { id: response.data.subscription_code };
+        },
+        async cancelSubscription(subscriptionId) {
+          const response = await paystack.subscription.disable({
+            code: subscriptionId,
+            token: 'dummy_token'
+          });
+          return { id: subscriptionId, status: 'cancelled' };
+        },
+        async changeSubscriptionPlan(subscriptionId, newPlanId) {
+          return { id: subscriptionId, plan: newPlanId };
+        },
+        verifyWebhookSignature(payload, signature) {
+          if (!signature) return false;
+          const hash = crypto.createHmac('sha512', paystackSecret).update(payload).digest('hex');
+          const hashBuf = Buffer.from(hash, 'utf8');
+          const sigBuf = Buffer.from(signature, 'utf8');
+          if (hashBuf.length !== sigBuf.length) return false;
+          return crypto.timingSafeEqual(hashBuf, sigBuf);
+        },
+        async createCustomer(email) {
+          const response = await paystack.customer.create({ email });
+          if (!response.status) throw new Error(response.message);
+          return response.data.customer_code;
+        },
+        async getCustomer(accountId) {
+          return null;
+        },
+        async verifyTransaction(transactionIdOrRef) {
+          const response = await paystack.transaction.verify({ reference: String(transactionIdOrRef) });
+          if (!response.status) throw new Error(response.message);
+          return response;
         }
-        
-        const response = await paystack.transaction.initialize({
-          email,
-          amount,
-          callback_url: returnUrl,
-          metadata: {
-            account_id: accountId,
-            plan_id: planId
-          }
-        });
-        
-        if (!response.status) {
-          throw new Error(`Paystack error: ${response.message}`);
-        }
-        
-        return response.data.authorization_url;
-      },
-      async createSubscription(customerId, planId) {
-        const response = await paystack.subscription.create({
-          customer: customerId,
-          plan: planId
-        });
-        if (!response.status) throw new Error(response.message);
-        return { id: response.data.subscription_code };
-      },
-      async cancelSubscription(subscriptionId) {
-        const response = await paystack.subscription.disable({
-          code: subscriptionId,
-          token: 'dummy_token'
-        });
-        return { id: subscriptionId, status: 'cancelled' };
-      },
-      async changeSubscriptionPlan(subscriptionId, newPlanId) {
-        return { id: subscriptionId, plan: newPlanId };
-      },
-      verifyWebhookSignature(payload, signature) {
-        if (!signature) return false;
-        const hash = crypto.createHmac('sha512', paystackSecret).update(payload).digest('hex');
-        const hashBuf = Buffer.from(hash, 'utf8');
-        const sigBuf = Buffer.from(signature, 'utf8');
-        if (hashBuf.length !== sigBuf.length) return false;
-        return crypto.timingSafeEqual(hashBuf, sigBuf);
-      },
-      async createCustomer(email) {
-        const response = await paystack.customer.create({ email });
-        if (!response.status) throw new Error(response.message);
-        return response.data.customer_code;
-      },
-      async getCustomer(accountId) {
-        return null;
-      },
-      async verifyTransaction(transactionIdOrRef) {
-        const response = await paystack.transaction.verify({ reference: String(transactionIdOrRef) });
-        if (!response.status) throw new Error(response.message);
-        return response;
-      }
-    };
-    setProvider(p);
-    return p;
+      };
+      setProvider(p);
+      return p;
+    }
   }
 
-  // 3. Stub Provider Fallback
-  console.log('Initializing stub payment provider');
+  // 3. Stub Provider Fallback — Strictly restricted to explicit test environment with ALLOW_TEST_PAYMENT_STUB=true
+  const isTestStubAllowed = (config.NODE_ENV === 'test' || process.env.NODE_ENV === 'test') &&
+    (config.ALLOW_TEST_PAYMENT_STUB === 'true' || process.env.ALLOW_TEST_PAYMENT_STUB === 'true');
+  if (!isTestStubAllowed) {
+    throw new Error('Payment provider "stub" is forbidden outside NODE_ENV=test with ALLOW_TEST_PAYMENT_STUB=true');
+  }
+
+  console.log('Initializing stub payment provider (TEST MODE)');
   const stub = {
     async createCheckoutSession(accountId, planId, returnUrl) {
       return `https://checkout.provider.com/${planId}?account=${accountId}`;

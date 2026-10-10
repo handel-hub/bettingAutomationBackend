@@ -129,6 +129,7 @@ async function handleVerify(req, res, next) {
       });
     }
 
+    let paymentResult = null;
     if (isSuccess && accountId) {
       const txMeta = tx.data?.meta || tx.data?.metadata || {};
       
@@ -159,7 +160,7 @@ async function handleVerify(req, res, next) {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        await applyPaymentSuccess(client, {
+        paymentResult = await applyPaymentSuccess(client, {
           accountId,
           planId,
           billingInterval,
@@ -180,7 +181,21 @@ async function handleVerify(req, res, next) {
     res.json({
       verified: true,
       status: 'Authorized',
-      snapshot
+      snapshot,
+      license: paymentResult ? {
+        licenseId: paymentResult.licenseId,
+        status: paymentResult.licenseStatus || 'VALID',
+        planId: paymentResult.planId,
+        capabilities: paymentResult.capabilities,
+        limits: paymentResult.limits
+      } : { status: 'VALID' },
+      capabilities: paymentResult?.capabilities || [
+        'CAP_AUTOMATION_START',
+        'CAP_AUTOMATION_STOP',
+        'CAP_FILE_UPLOAD',
+        'CAP_TACTICAL_BET',
+        'CAP_CASH_OUT'
+      ]
     });
   } catch (err) {
     next(err);

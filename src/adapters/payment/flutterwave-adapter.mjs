@@ -45,6 +45,21 @@ export class FlutterwaveAdapter {
   }
 
   /**
+   * Returns true only when running in an explicit test environment with ALLOW_TEST_PAYMENT_STUB=true
+   * and a mock key or FLW_MOCK=true is configured.
+   * @returns {boolean}
+   */
+  _isTestMockAllowed() {
+    const isTestEnv = process.env.NODE_ENV === 'test';
+    const isStubAllowed = process.env.ALLOW_TEST_PAYMENT_STUB === 'true';
+    return Boolean(
+      isTestEnv &&
+      isStubAllowed &&
+      ((typeof this.secretKey === 'string' && this.secretKey.includes('mock')) || process.env.FLW_MOCK === 'true')
+    );
+  }
+
+  /**
    * Create a checkout session (Standard Hosted Payment Link)
    * @param {string} accountId 
    * @param {string} planId 
@@ -80,13 +95,12 @@ export class FlutterwaveAdapter {
 
     const txRef = `flw_${accountId}_${planId}_${Date.now()}`;
 
-    // If mock key or explicitly instructed to mock, return deterministic hosted mock link
-    if (
-      !this.secretKey ||
-      this.secretKey.includes('mock') ||
-      process.env.FLW_MOCK === 'true'
-    ) {
+    if (this._isTestMockAllowed()) {
       return `https://checkout.flutterwave.com/v3/hosted/pay/${txRef}?account=${accountId}&plan=${planId}&amount=${amount}`;
+    }
+
+    if (!this.secretKey || this.secretKey.includes('mock')) {
+      throw new Error('FlutterwaveAdapter mock checkout URL generation is forbidden: secretKey is missing or uses a mock placeholder outside NODE_ENV=test with ALLOW_TEST_PAYMENT_STUB=true');
     }
 
     const payload = {
@@ -209,21 +223,21 @@ export class FlutterwaveAdapter {
    * @returns {Promise<any>}
    */
   async verifyTransaction(transactionIdOrRef) {
-    if (
-      !this.secretKey ||
-      this.secretKey.includes('mock') ||
-      process.env.FLW_MOCK === 'true'
-    ) {
+    if (this._isTestMockAllowed()) {
       return {
         status: 'success',
         data: {
           id: transactionIdOrRef,
           tx_ref: String(transactionIdOrRef),
           status: 'successful',
-          amount: 10000,
+          amount: 100000,
           currency: 'NGN'
         }
       };
+    }
+
+    if (!this.secretKey || this.secretKey.includes('mock')) {
+      throw new Error('Flutterwave secretKey is missing or uses a mock placeholder outside NODE_ENV=test with ALLOW_TEST_PAYMENT_STUB=true');
     }
 
     const paramStr = String(transactionIdOrRef).trim();
