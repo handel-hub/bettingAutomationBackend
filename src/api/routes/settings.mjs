@@ -27,7 +27,10 @@ router.post('/intent', async (req, res, next) => {
   try {
     // @ts-ignore
     const accountId = req.accountId;
-    const ack = await processSettingsIntent(accountId, req.body);
+    const intentBody = (req.body && req.body.payload && typeof req.body.payload === 'object' && req.body.payload.type)
+      ? req.body.payload
+      : req.body;
+    const ack = await processSettingsIntent(accountId, intentBody);
 
     if (ack.status === 'ACCEPTED') {
       const fresh = await getSettingsSnapshot(accountId);

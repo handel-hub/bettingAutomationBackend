@@ -112,6 +112,24 @@ export async function processSettingsIntent(accountId, intent) {
       const { email } = payload;
       if (!email) throw new Error('Email is required');
 
+      const secret = stepUpSecret || payload.currentPassword;
+      if (!secret) {
+        return {
+          requestId,
+          status: 'REQUIRES_STEP_UP',
+          section: 'SECURITY',
+          message: 'Please provide your current password to confirm email change'
+        };
+      }
+
+      const accRes = await pool.query('SELECT password_hash FROM accounts WHERE account_id = $1', [accountId]);
+      const valid = accRes.rows[0]?.password_hash
+        ? await verifyPassword(String(secret), accRes.rows[0].password_hash).catch(() => false)
+        : false;
+      if (!valid) {
+        return { requestId, status: 'CHALLENGE_FAILED', section: 'SECURITY', message: 'Current password is incorrect' };
+      }
+
       await pool.query(`
         UPDATE operator_settings
         SET pending_email = $1, updated_at = now()
@@ -143,20 +161,31 @@ export async function processSettingsIntent(accountId, intent) {
     }
 
     case 'UPDATE_PASSWORD': {
-      const { currentPassword, newPassword } = payload;
-      if (!currentPassword || !newPassword) {
-        return { requestId, status: 'REJECTED', message: 'Current and new password are required' };
+      const currentPassword = stepUpSecret || payload.currentPassword;
+      const { newPassword } = payload;
+      if (!currentPassword) {
+        return {
+          requestId,
+          status: 'REQUIRES_STEP_UP',
+          section: 'SECURITY',
+          message: 'Step-up authorization required (current password)'
+        };
+      }
+      if (!newPassword || String(newPassword).length < 8) {
+        return { requestId, status: 'REJECTED', section: 'SECURITY', message: 'New password must be at least 8 characters' };
       }
 
-      // Check current password
-      const accRes = await pool.query('SELECT credentials_hash FROM accounts WHERE account_id = $1', [accountId]);
-      const valid = await verifyPassword(currentPassword, accRes.rows[0].credentials_hash);
+      // Check current password against password_hash
+      const accRes = await pool.query('SELECT password_hash FROM accounts WHERE account_id = $1', [accountId]);
+      const valid = accRes.rows[0]?.password_hash
+        ? await verifyPassword(String(currentPassword), accRes.rows[0].password_hash).catch(() => false)
+        : false;
       if (!valid) {
-        return { requestId, status: 'CHALLENGE_FAILED', message: 'Current password is incorrect' };
+        return { requestId, status: 'CHALLENGE_FAILED', section: 'SECURITY', message: 'Current password is incorrect' };
       }
 
-      const newHash = await hashPassword(newPassword);
-      await pool.query('UPDATE accounts SET credentials_hash = $1, updated_at = now() WHERE account_id = $2', [newHash, accountId]);
+      const newHash = await hashPassword(String(newPassword));
+      await pool.query('UPDATE accounts SET password_hash = $1, updated_at = now() WHERE account_id = $2', [newHash, accountId]);
 
       return {
         requestId,
@@ -207,10 +236,12 @@ export async function processSettingsIntent(accountId, intent) {
         };
       }
 
-      const accRes = await pool.query('SELECT credentials_hash FROM accounts WHERE account_id = $1', [accountId]);
-      const valid = await verifyPassword(stepUpSecret, accRes.rows[0].credentials_hash);
+      const accRes = await pool.query('SELECT password_hash FROM accounts WHERE account_id = $1', [accountId]);
+      const valid = accRes.rows[0]?.password_hash
+        ? await verifyPassword(String(stepUpSecret), accRes.rows[0].password_hash).catch(() => false)
+        : false;
       if (!valid) {
-        return { requestId, status: 'CHALLENGE_FAILED', message: 'Incorrect password confirmation' };
+        return { requestId, status: 'CHALLENGE_FAILED', section: 'SECURITY', message: 'Incorrect password confirmation' };
       }
 
       const deletionDate = new Date(Date.now() + 14 * 86400000).toISOString();

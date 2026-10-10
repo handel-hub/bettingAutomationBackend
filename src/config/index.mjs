@@ -22,3 +22,8 @@ export function loadConfig() {
   cachedConfig = result.data;
   return cachedConfig;
 }
+
+export function resetConfigCache() {
+  cachedConfig = null;
+}
+

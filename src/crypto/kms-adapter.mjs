@@ -33,8 +33,42 @@ export function deriveKeyPair(secret, keyId = 'default') {
 class LocalKmsAdapter {
   constructor() {
     const config = loadConfig();
-    this.secret = config.KMS_LOCAL_SECRET || 'default_local_dev_secret_32_bytes_long';
+    if (!config.KMS_LOCAL_SECRET || config.KMS_LOCAL_SECRET.length < 32) {
+      throw new Error('[KMS] KMS_LOCAL_SECRET must be explicitly configured in .env (>= 32 characters).');
+    } else {
+      this.secret = config.KMS_LOCAL_SECRET;
+    }
     this.keys = new Map();
+  }
+
+  /**
+   * Return the hex-encoded Ed25519 public key for a given key version.
+   * @param {string} [versionTag='v1']
+   * @returns {string}
+   */
+  getPublicKeyHex(versionTag = 'v1') {
+    const { publicKeyHex } = deriveKeyPair(this.secret, versionTag);
+    return publicKeyHex;
+  }
+
+  /**
+   * Eagerly initialize the KMS adapter and ensure the active backend key in PostgreSQL matches.
+   * @returns {Promise<string>} The active publicKeyHex
+   */
+  async initialize() {
+    const publicKeyHex = this.getPublicKeyHex('v1');
+    try {
+      const { getPool } = await import('../persistence/connection.mjs');
+      const pool = getPool();
+      await pool.query(`
+        INSERT INTO backend_keys (key_version, public_key_hex, status, activated_at)
+        VALUES (1, $1, 'ACTIVE', now())
+        ON CONFLICT (key_version) DO UPDATE SET public_key_hex = EXCLUDED.public_key_hex, status = 'ACTIVE';
+      `, [publicKeyHex]);
+    } catch {
+      // Ignore if DB is not connected yet in unit tests
+    }
+    return publicKeyHex;
   }
 
   /**
@@ -64,7 +98,7 @@ class LocalKmsAdapter {
   }
 }
 
-/** @type {KmsAdapter} */
+/** @type {LocalKmsAdapter} */
 let adapterInstance;
 
 export function getKmsAdapter() {
@@ -78,3 +112,8 @@ export function getKmsAdapter() {
   }
   return adapterInstance;
 }
+
+export function resetKmsAdapter() {
+  adapterInstance = undefined;
+}
+

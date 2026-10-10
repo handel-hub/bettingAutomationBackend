@@ -38,6 +38,8 @@ import { stopScheduler } from './jobs/scheduler.mjs';
 import { bootstrapDevAccounts } from './persistence/bootstrap.mjs';
 import { closePool } from './persistence/connection.mjs';
 import { isOriginAllowed } from './utils/cors.mjs';
+import { getKmsAdapter } from './crypto/kms-adapter.mjs';
+
 
 const app = express();
 const sysLogger = rootLogger.child({ component: 'Server' });
@@ -167,6 +169,7 @@ app.use(errorHandler);
 const config = loadConfig();
 const port = config.PORT || 3001;
 
+const kmsAdapter = getKmsAdapter();
 initializePaymentAdapter(config.PAYMENT_PROVIDER, config);
 
 // Create HTTP server to attach both Express and WebSocket
@@ -218,10 +221,11 @@ if (process.argv[1] && process.argv[1].endsWith('server.mjs')) {
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
   httpServer.listen(port, async () => {
-    sysLogger.info({ event: 'server_started', port, env: config.NODE_ENV }, `Backend server listening on port ${port}`);
+    const publicKeyHex = await kmsAdapter.initialize();
+    sysLogger.info({ event: 'server_started', port, env: config.NODE_ENV, publicKeyHex }, `Backend server listening on port ${port}`);
     
-    // Auto-bootstrap default developer accounts idempotently if running in development mode
-    if (config.NODE_ENV === 'development') {
+    // Only auto-bootstrap test accounts if explicitly requested via AUTO_SEED_TEST_DATA=true
+    if (config.NODE_ENV !== 'production' && config.AUTO_SEED_TEST_DATA === 'true') {
       await bootstrapDevAccounts();
     }
 
@@ -232,3 +236,4 @@ if (process.argv[1] && process.argv[1].endsWith('server.mjs')) {
 }
 
 export { app };
+

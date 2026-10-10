@@ -7,9 +7,10 @@ import { withTransaction } from '../../persistence/transaction.mjs';
  * @returns {any} capabilities JSON
  */
 export function computeCapabilities(license) {
-  if (!license) return {};
-  return license.capabilities || {};
+  if (!license) return [];
+  return Array.isArray(license.capabilities) ? license.capabilities : [];
 }
+
 
 /**
  * Resolve authorization for a session
