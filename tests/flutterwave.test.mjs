@@ -192,6 +192,7 @@ test('Flutterwave v3 Payment Gateway Test Suite', async (t) => {
     const flwAmount = 25000; // ₦25,000 in major units
     const idempotencyKey = `evt-flw-succ-${Date.now()}`;
 
+    const eventTxId = Date.now() + Math.floor(Math.random() * 1000);
     // Enqueue Flutterwave webhook outbox event
     await pool.query(`
       INSERT INTO outbox_events (event_type, payload, idempotency_key, status)
@@ -199,7 +200,7 @@ test('Flutterwave v3 Payment Gateway Test Suite', async (t) => {
     `, [JSON.stringify({
       event: 'charge.completed',
       data: {
-        id: 771122,
+        id: eventTxId,
         tx_ref: txRef,
         flw_ref: `FLW-${txRef}`,
         status: 'successful',

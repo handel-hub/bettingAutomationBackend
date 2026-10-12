@@ -47,6 +47,8 @@ before(async () => {
   }
 
   const pool = getPool();
+  // Reset circuit breaker so tests that run revocation are not blocked
+  await pool.query('DELETE FROM revocation_circuit_breaker');
   // Ensure tester account is ACTIVE and has generous machine limit for test setup
   await pool.query("UPDATE accounts SET status = 'ACTIVE' WHERE account_id = $1", [TESTER_ACCOUNT_ID]);
   await pool.query(
@@ -348,6 +350,7 @@ test('System-Wide Security Redesign Invariant Suite (SEC-INV-01 through SEC-INV-
     const licenseId = licRow.rows[0].license_id;
 
     const sessionBeforeRevoke = await authenticate('tester@bettingautomation.com', 'Password123!', sharedMachineId, 2, `nonce-${crypto.randomUUID()}`);
+    await pool.query('DELETE FROM revocation_circuit_breaker');
     await executeRevocation('LICENSE', licenseId, 'Security Invariant Test Revocation', { type: 'ADMIN', id: 'sec-inv-admin' });
     const revRow = await pool.query(
       "SELECT payload FROM outbox_events WHERE event_type = 'REVOCATION_NOTICE' ORDER BY created_at DESC LIMIT 1"

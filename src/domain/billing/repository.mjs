@@ -88,7 +88,7 @@ export async function resumeSubscriptionInDb(client, accountId) {
   const res = await runner.query(`
     UPDATE subscriptions
     SET status = 'ACTIVE', cancelled_at = null, updated_at = now()
-    WHERE account_id = $1 AND status = 'CANCELLED'
+    WHERE account_id = $1 AND status = 'CANCELLED' AND current_period_end > now()
     RETURNING current_period_end
   `, [accountId]);
   return res.rows[0] || null;
