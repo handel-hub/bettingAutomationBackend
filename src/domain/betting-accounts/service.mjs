@@ -124,9 +124,11 @@ export async function createBettingAccount(accountId, data) {
 
   return withTransaction('READ COMMITTED', async (client) => {
     const licRes = await client.query(`
-      SELECT limits FROM licenses
+      SELECT limits
+      FROM licenses
       WHERE account_id = $1 AND status = 'VALID' AND (expires_at IS NULL OR expires_at > now())
       ORDER BY issued_at DESC LIMIT 1
+      FOR UPDATE
     `, [accountId]);
     if (licRes.rows.length === 0) {
       const err = new Error('Active valid license required to create betting accounts');
@@ -138,19 +140,6 @@ export async function createBettingAccount(accountId, data) {
     }
 
     const limits = licRes.rows[0]?.limits || {};
-    const maxAccounts = limits.maxAccounts ?? limits.max_accounts;
-    if (typeof maxAccounts === 'number' && maxAccounts > 0) {
-      const currentCount = await countAccountsByAccount(client, accountId);
-      if (currentCount >= maxAccounts) {
-        const err = new Error(`Plan limit reached: maximum of ${maxAccounts} betting accounts allowed`);
-        // @ts-ignore
-        err.status = 403;
-        // @ts-ignore
-        err.code = 'ENTITLEMENT_LIMIT_REACHED';
-        throw err;
-      }
-    }
-
     const allowedPlatforms = limits.allowedPlatformIds || limits.allowed_platform_ids || limits.allowedPlatforms;
     if (
       Array.isArray(allowedPlatforms) &&
@@ -169,6 +158,19 @@ export async function createBettingAccount(accountId, data) {
         err.status = 403;
         // @ts-ignore
         err.code = 'BE_PERM_ENTITLEMENT_EXCEEDED';
+        throw err;
+      }
+    }
+
+    const maxAccounts = limits.maxAccounts ?? limits.max_accounts;
+    if (typeof maxAccounts === 'number' && maxAccounts > 0) {
+      const currentCount = await countAccountsByAccount(client, accountId);
+      if (currentCount >= maxAccounts) {
+        const err = new Error(`Plan limit reached: maximum of ${maxAccounts} betting accounts allowed`);
+        // @ts-ignore
+        err.status = 403;
+        // @ts-ignore
+        err.code = 'ENTITLEMENT_LIMIT_REACHED';
         throw err;
       }
     }
@@ -326,9 +328,9 @@ export async function executeAccountAction(accountId, id, actionType) {
     return { success: true, accountId: id, action: 'DELETED', backendState: 'DELETED', presentationCategory: 'Neutral', statusDescription: 'Account deleted' };
   }
 
-  let newState = 'ACTIVE';
-  let category = 'Healthy';
-  let description = 'Operating normally';
+  let newState;
+  let category;
+  let description;
 
   if (actionType === 'DEACTIVATE_ACCOUNT' || actionType === 'DEACTIVATE') {
     newState = 'SUSPENDED';
@@ -343,6 +345,13 @@ export async function executeAccountAction(accountId, id, actionType) {
     newState = 'ACTIVE';
     category = 'Healthy';
     description = 'Operating normally';
+  } else {
+    const err = new Error(`Unsupported account action type: ${String(actionType)}`);
+    // @ts-ignore
+    err.code = 'INVALID_ACTION_TYPE';
+    // @ts-ignore
+    err.status = 400;
+    throw err;
   }
 
   const res = await updateAccountState(undefined, accountId, id, { newState, category, description });
@@ -364,9 +373,18 @@ export async function executeAccountAction(accountId, id, actionType) {
  * @param {string[]} accountIds 
  * @returns {Promise<Object>}
  */
-export async function executeBulkAction(accountId, actionType, accountIds) {
+export async function executeBulkAction(accountId, accountActionType, accountIds) {
+  const actionType = accountActionType;
   if (!Array.isArray(accountIds) || accountIds.length === 0) {
     throw new Error('accountIds must be a non-empty array');
+  }
+  if (!['BULK_DELETE', 'BULK_ACTIVATE', 'BULK_DEACTIVATE'].includes(actionType)) {
+    const err = new Error(`Unsupported bulk action type: ${String(actionType)}`);
+    // @ts-ignore
+    err.code = 'INVALID_ACTION_TYPE';
+    // @ts-ignore
+    err.status = 400;
+    throw err;
   }
 
   let successful = 0;

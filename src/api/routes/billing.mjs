@@ -55,12 +55,18 @@ async function handleCheckout(req, res, next) {
     const interval = (billingInterval || 'monthly').toLowerCase();
 
     const pool = getPool();
-    const planRes = await pool.query('SELECT * FROM subscription_plans WHERE LOWER(plan_id) = $1', [targetPlanId]);
+    const planRes = await pool.query('SELECT * FROM subscription_plans WHERE LOWER(plan_id) = $1 AND is_active = true', [targetPlanId]);
     const plan = planRes.rows[0];
+    if (!plan) {
+      return res.status(400).json({
+        code: 'INVALID_PLAN',
+        error: `Unknown or inactive subscription plan: ${targetPlanId}`
+      });
+    }
 
-    const amount = plan ? (interval === 'annual' ? Number(plan.annual_price) : Number(plan.monthly_price)) : 10000;
-    const resolvedPlanName = plan ? plan.name : (targetPlanId.charAt(0).toUpperCase() + targetPlanId.slice(1));
-    const resolvedPlanId = plan ? plan.plan_id : targetPlanId;
+    const amount = interval === 'annual' ? Number(plan.annual_price) : Number(plan.monthly_price);
+    const resolvedPlanName = plan.name;
+    const resolvedPlanId = plan.plan_id;
 
     const effectiveReturnUrl = returnUrl || 'http://localhost:3000/workspace/billing';
     try {
@@ -207,6 +213,14 @@ async function handleVerify(req, res, next) {
           error: `Payment amount (${amount}) is insufficient for requested plan (${planId}: ${expectedPrice})`
         });
       }
+      // Prevent cross-tier plan spoofing (e.g. using a Pro Annual payment to claim Elite Monthly when provider metadata omits plan_id)
+      if (!txMeta.plan_id && planId !== 'pro' && amount !== expectedPrice) {
+        return res.status(400).json({
+          verified: false,
+          code: 'PLAN_METADATA_MISMATCH',
+          error: `Payment amount (${amount}) does not match exact price (${expectedPrice}) for unverified plan ${planId}`
+        });
+      }
 
       const client = await pool.connect();
       try {
@@ -252,14 +266,19 @@ async function handleVerify(req, res, next) {
     const rawLicense = paymentResult ? {
       id: paymentResult.licenseId,
       licenseId: paymentResult.licenseId,
+      accountId,
       status: paymentResult.licenseStatus || 'VALID',
       planId: paymentResult.planId,
+      expiresAt: paymentResult.expiresAt || snapshot?.expirationDate || null,
       capabilities: paymentResult.capabilities,
       limits: paymentResult.limits
     } : {
       id: snapshot?.subscription?.id || `lic-${accountId}`,
+      licenseId: snapshot?.subscription?.id || `lic-${accountId}`,
+      accountId,
       status: 'VALID',
       planId: snapshot?.subscription?.planId || 'pro',
+      expiresAt: snapshot?.expirationDate || null,
       capabilities: responseCapabilities
     };
     const signedLicense = rawLicense.status === 'VALID'

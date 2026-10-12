@@ -57,7 +57,7 @@ before(async () => {
     `UPDATE licenses
      SET status = 'VALID',
          expires_at = now() + interval '30 days',
-         limits = jsonb_set(COALESCE(limits, '{}'::jsonb), '{max_machines}', '50')
+         limits = jsonb_set((COALESCE(limits, '{}'::jsonb) - 'allowedPlatformIds' - 'maxAccounts'), '{max_machines}', '50')
      WHERE license_id = (
        SELECT license_id FROM licenses WHERE account_id = $1 ORDER BY (status = 'VALID') DESC, issued_at DESC LIMIT 1
      )`,
@@ -353,18 +353,20 @@ test('System-Wide Security Redesign Invariant Suite (SEC-INV-01 through SEC-INV-
 
     const sessionBeforeRevoke = await authenticate('tester@bettingautomation.com', 'Password123!', sharedMachineId, 2, `nonce-${crypto.randomUUID()}`);
     await pool.query('DELETE FROM revocation_circuit_breaker');
-    await executeRevocation('LICENSE', licenseId, 'Security Invariant Test Revocation', { type: 'ADMIN', id: 'sec-inv-admin' });
-    const revRow = await pool.query(
-      "SELECT payload FROM outbox_events WHERE event_type = 'REVOCATION_NOTICE' ORDER BY created_at DESC LIMIT 1"
-    );
-    const revPayload = typeof revRow.rows[0]?.payload === 'string' ? JSON.parse(revRow.rows[0].payload) : revRow.rows[0]?.payload;
-    assert.strictEqual(revPayload?.accountId, TESTER_ACCOUNT_ID, 'REVOCATION_NOTICE outbox event must record resolved accountId for LICENSE scope');
+    try {
+      await executeRevocation('LICENSE', licenseId, 'Security Invariant Test Revocation', { type: 'ADMIN', id: 'sec-inv-admin' });
+      const revRow = await pool.query(
+        "SELECT payload FROM outbox_events WHERE event_type = 'REVOCATION_NOTICE' ORDER BY created_at DESC LIMIT 1"
+      );
+      const revPayload = typeof revRow.rows[0]?.payload === 'string' ? JSON.parse(revRow.rows[0].payload) : revRow.rows[0]?.payload;
+      assert.strictEqual(revPayload?.accountId, TESTER_ACCOUNT_ID, 'REVOCATION_NOTICE outbox event must record resolved accountId for LICENSE scope');
 
-    const sessCheck = await pool.query('SELECT status FROM sessions WHERE session_id = $1', [sessionBeforeRevoke.sessionId]);
-    assert.strictEqual(sessCheck.rows[0].status, 'REVOKED', 'LICENSE revocation must cascade to active sessions');
-
-    // Restore license and re-authenticate shared session for remaining tests
-    await pool.query("UPDATE licenses SET status = 'VALID' WHERE license_id = $1", [licenseId]);
+      const sessCheck = await pool.query('SELECT status FROM sessions WHERE session_id = $1', [sessionBeforeRevoke.sessionId]);
+      assert.strictEqual(sessCheck.rows[0].status, 'REVOKED', 'LICENSE revocation must cascade to active sessions');
+    } finally {
+      // Restore license and re-authenticate shared session for remaining tests
+      await pool.query("UPDATE licenses SET status = 'VALID' WHERE license_id = $1", [licenseId]);
+    }
     const restoredAuth = await authenticate('tester@bettingautomation.com', 'Password123!', sharedMachineId, 2, `nonce-${crypto.randomUUID()}`);
     sharedSessionId = restoredAuth.sessionId;
     sharedSessionGen = restoredAuth.sessionGeneration;
@@ -615,6 +617,8 @@ test('System-Wide Security Redesign Invariant Suite (SEC-INV-01 through SEC-INV-
 
     // 1. authenticate() returns a cryptographically signed license payload
     const authRes = await authenticate('tester@bettingautomation.com', 'Password123!', sharedMachineId, 2, `nonce-wb-${crypto.randomUUID()}`);
+    sharedSessionId = authRes.sessionId;
+    sharedSessionGen = authRes.sessionGeneration;
     assert.ok(authRes.license, 'authenticate() must return license object');
     assert.strictEqual(typeof authRes.license.signature, 'string', 'license.signature must be a hex string');
     assert.strictEqual(authRes.license.signature.length, 128, 'Ed25519 signature must be 128 hex chars');
@@ -654,6 +658,62 @@ test('System-Wide Security Redesign Invariant Suite (SEC-INV-01 through SEC-INV-
         [TESTER_ACCOUNT_ID]
       );
     }
+  });
+
+  await t.test('T-REG-01..T-REG-05: Post-Audit Adversarial Regression Suite (F-01 through F-07)', async () => {
+    const baseUrl = getServerBaseUrl();
+    const pool = getPool();
+
+    // T-REG-01 (F-01): Failed login attempt commits lockout_count and LOGIN_FAILURE audit log across transaction boundary
+    await pool.query('UPDATE accounts SET lockout_count = 0, lockout_expires_at = NULL WHERE account_id = $1', [TESTER_ACCOUNT_ID]);
+    await assert.rejects(
+      async () => {
+        await authenticate('TESTER@BETTINGAUTOMATION.COM', 'WrongPassword999!', sharedMachineId, 2, `nonce-f01-${crypto.randomUUID()}`);
+      },
+      (err) => err.status === 401
+    );
+    const accAfterFail = await pool.query('SELECT lockout_count FROM accounts WHERE account_id = $1', [TESTER_ACCOUNT_ID]);
+    assert.strictEqual(Number(accAfterFail.rows[0].lockout_count), 1, 'T-REG-01: lockout_count must persist in DB after 401 rejection');
+    await pool.query('UPDATE accounts SET lockout_count = 0, lockout_expires_at = NULL WHERE account_id = $1', [TESTER_ACCOUNT_ID]);
+
+    // T-REG-02 (F-04): Concurrent applyPaymentSuccess for the same reference serializes via FOR UPDATE and allows only 1 redemption
+    const raceRef = `ref-race-f04-${crypto.randomUUID()}`;
+    const raceResults = await Promise.allSettled([
+      applyPaymentSuccess(undefined, { accountId: TESTER_ACCOUNT_ID, planId: 'pro', amount: 49000, reference: raceRef }),
+      applyPaymentSuccess(undefined, { accountId: TESTER_ACCOUNT_ID, planId: 'pro', amount: 49000, reference: raceRef })
+    ]);
+    const fulfilled = raceResults.filter((r) => r.status === 'fulfilled');
+    const rejected = raceResults.filter((r) => r.status === 'rejected');
+    assert.strictEqual(fulfilled.length, 1, 'T-REG-02: Exactly 1 concurrent payment redemption must succeed');
+    assert.strictEqual(rejected.length, 1, 'T-REG-02: Second concurrent payment redemption must reject');
+    assert.strictEqual(/** @type {any} */ (rejected[0]).reason?.code, 'PAYMENT_ALREADY_REDEEMED');
+
+    // T-REG-03 (F-02): Unknown actionType on /api/v1/accounts/:id/action and /bulk-action returns 400 INVALID_ACTION_TYPE
+    const badActionRes = await fetch(`${baseUrl}/api/v1/accounts/${crypto.randomUUID()}/action`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sharedSessionId}`
+      },
+      body: JSON.stringify({ type: 'UNKNOWN_MALICIOUS_ACTION' })
+    });
+    assert.strictEqual(badActionRes.status, 400, 'T-REG-03: Unknown single account actionType must return 400');
+
+    const badBulkRes = await fetch(`${baseUrl}/api/v1/accounts/bulk-action`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sharedSessionId}`
+      },
+      body: JSON.stringify({ type: 'UNKNOWN_BULK_ACTION', accountIds: [crypto.randomUUID()] })
+    });
+    assert.strictEqual(badBulkRes.status, 400, 'T-REG-03: Unknown bulk actionType must return 400');
+
+    // T-REG-05 (F-05, F-07): Non-UUID Bearer token returns 401 instead of 500 PG 22P02, and signed license binds accountId
+    const malformedTokenRes = await fetch(`${baseUrl}/api/v1/accounts`, {
+      headers: { Authorization: 'Bearer not-a-valid-uuid-token' }
+    });
+    assert.strictEqual(malformedTokenRes.status, 401, 'T-REG-05: Malformed non-UUID Bearer token must return 401, not 500');
   });
 });
 

@@ -179,11 +179,12 @@ export async function enforceSeatLimitWithDormancyReclamation(
       )
       AND (
         COALESCE(m.last_verified_at, m.updated_at, m.created_at) < now() - ($3::interval)
-        OR EXISTS (
-          SELECT 1 FROM sessions s
+        OR (
+          SELECT s.status FROM sessions s
           WHERE s.machine_id = m.machine_id
-            AND s.status = 'LOGGED_OUT'
-        )
+          ORDER BY s.created_at DESC
+          LIMIT 1
+        ) = 'LOGGED_OUT'
       )
     ORDER BY COALESCE(m.last_verified_at, m.updated_at, m.created_at) ASC
     LIMIT $4
@@ -202,6 +203,14 @@ export async function enforceSeatLimitWithDormancyReclamation(
       UPDATE sessions
       SET status = 'REVOKED'
       WHERE machine_id = ANY($1::uuid[]) AND status = 'AUTHENTICATED'
+    `, [machinesToRevoke]);
+
+    await runner.query(`
+      UPDATE machine_session_states
+      SET session_generation = session_generation + 1,
+          machine_generation = machine_generation + 1,
+          updated_at = now()
+      WHERE machine_id = ANY($1::uuid[])
     `, [machinesToRevoke]);
 
     activeCount -= machinesToRevoke.length;

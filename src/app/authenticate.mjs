@@ -22,7 +22,7 @@ const DUMMY_ARGON2_HASH = '$argon2id$v=19$m=65536,t=3,p=1$PiOvQnUc2ju2CCzdXcmXDQ
  * @returns {Promise<any>}
  */
 export async function authenticate(email, password, machineId, protocolVersion, clientNonce) {
-  return withTransaction('SERIALIZABLE', async (client) => {
+  const txResult = await withTransaction('SERIALIZABLE', async (client) => {
     // 1. Lock account and verify credentials
     const account = await getAccountByEmailForUpdate(client, email);
     if (!account) {
@@ -41,7 +41,7 @@ export async function authenticate(email, password, machineId, protocolVersion, 
       err.status = 401;
       // @ts-ignore
       err.code = 'BE_AUTH_INVALID_CREDENTIALS';
-      throw err;
+      return { _authFailedError: err };
     }
     
     const credResult = await verifyCredentials(account, password);
@@ -62,7 +62,7 @@ export async function authenticate(email, password, machineId, protocolVersion, 
       err.status = 401;
       // @ts-ignore
       err.code = 'BE_AUTH_INVALID_CREDENTIALS';
-      throw err;
+      return { _authFailedError: err };
     }
     
     // Clear lockout on success
@@ -107,7 +107,7 @@ export async function authenticate(email, password, machineId, protocolVersion, 
           await client.query('SELECT account_id FROM accounts WHERE account_id = $1 FOR UPDATE', [account.account_id]);
 
           const licenseRes = await client.query(
-            "SELECT limits FROM licenses WHERE account_id = $1 AND status = 'VALID' ORDER BY issued_at DESC LIMIT 1",
+            "SELECT limits FROM licenses WHERE account_id = $1 AND status = 'VALID' AND (expires_at IS NULL OR expires_at > now()) ORDER BY issued_at DESC LIMIT 1",
             [account.account_id]
           );
           const maxMachines = licenseRes.rows[0]?.limits?.max_machines || 5;
@@ -236,6 +236,7 @@ export async function authenticate(email, password, machineId, protocolVersion, 
 
     const rawLicensePayload = license ? {
       id: license.license_id,
+      accountId: account.account_id,
       planId: license.plan_id,
       status: hasValidLicense ? 'VALID' : (license.status === 'REVOKED' ? 'REVOKED' : 'EXPIRED'),
       expiresAt: license.expires_at ? new Date(license.expires_at).toISOString() : null,
@@ -261,5 +262,11 @@ export async function authenticate(email, password, machineId, protocolVersion, 
       graceToken
     };
   });
+
+  if (txResult && txResult._authFailedError) {
+    throw txResult._authFailedError;
+  }
+
+  return txResult;
 }
 

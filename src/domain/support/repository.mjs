@@ -111,10 +111,19 @@ export async function findTicketsByAccount(client, accountId) {
 export async function insertDiagnosticReport(client, accountId, data) {
   const runner = client || getPool();
   const { telemetry = {}, recentLogs = [], machineId = null } = data;
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let resolvedMachineId = null;
+  if (machineId && UUID_REGEX.test(String(machineId))) {
+    const machRes = await runner.query(
+      'SELECT machine_id FROM machines WHERE machine_id = $1 AND account_id = $2',
+      [machineId, accountId]
+    );
+    resolvedMachineId = machRes.rows[0]?.machine_id || null;
+  }
   const res = await runner.query(`
     INSERT INTO diagnostic_reports (account_id, machine_id, telemetry, recent_logs)
     VALUES ($1, $2, $3, $4)
     RETURNING report_id
-  `, [accountId, machineId, JSON.stringify(telemetry), JSON.stringify(recentLogs)]);
+  `, [accountId, resolvedMachineId, JSON.stringify(telemetry), JSON.stringify(recentLogs)]);
   return res.rows[0];
 }

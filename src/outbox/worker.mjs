@@ -163,22 +163,29 @@ export async function processOutboxEvent(event) {
               ? Number(rawAmountVal)
               : (Number(rawAmountVal) / 100);
 
-            const planRes = await client.query('SELECT * FROM subscription_plans WHERE LOWER(plan_id) = LOWER($1)', [planId]);
+            const planRes = await client.query('SELECT * FROM subscription_plans WHERE LOWER(plan_id) = LOWER($1) AND is_active = true', [planId]);
             const plan = planRes.rows[0];
-            if (plan) {
-              const expectedPrice = billingInterval === 'annual' ? Number(plan.annual_price) : Number(plan.monthly_price);
-              if (majorAmount < expectedPrice) {
-                outboxLogger.warn({
-                  event: 'payment_webhook_amount_insufficient',
-                  accountId: accId,
-                  planId,
-                  billingInterval,
-                  majorAmount,
-                  expectedPrice,
-                  reference: ref
-                }, `Rejected webhook payment with insufficient amount (${majorAmount} < ${expectedPrice})`);
-                return true;
-              }
+            if (!plan) {
+              outboxLogger.warn({
+                event: 'payment_webhook_unknown_plan',
+                accountId: accId,
+                planId,
+                reference: ref
+              }, `Rejected webhook payment for unknown or inactive plan (${planId})`);
+              return true;
+            }
+            const expectedPrice = billingInterval === 'annual' ? Number(plan.annual_price) : Number(plan.monthly_price);
+            if (majorAmount < expectedPrice) {
+              outboxLogger.warn({
+                event: 'payment_webhook_amount_insufficient',
+                accountId: accId,
+                planId,
+                billingInterval,
+                majorAmount,
+                expectedPrice,
+                reference: ref
+              }, `Rejected webhook payment with insufficient amount (${majorAmount} < ${expectedPrice})`);
+              return true;
             }
 
             const providerSubId = payload.data?.subscription_code || payload.data?.flw_ref || `sub-${ref}`;

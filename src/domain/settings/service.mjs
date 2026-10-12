@@ -87,8 +87,16 @@ export async function getSettingsSnapshot(accountId) {
 export async function processSettingsIntent(accountId, intent, context = {}) {
   const pool = getPool();
   const { type, payload = {}, stepUpSecret } = intent;
-  const currentSessionId = context?.currentSessionId || intent?.currentSessionId || null;
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const rawSessionId = context?.currentSessionId || intent?.currentSessionId || null;
+  const currentSessionId = (rawSessionId && UUID_REGEX.test(String(rawSessionId))) ? String(rawSessionId) : null;
   const requestId = `req-${crypto.randomUUID()}`;
+
+  await pool.query(`
+    INSERT INTO operator_settings (account_id, name)
+    VALUES ($1, 'Operator')
+    ON CONFLICT (account_id) DO NOTHING
+  `, [accountId]);
 
   switch (type) {
     case 'UPDATE_PROFILE': {
@@ -143,7 +151,10 @@ export async function processSettingsIntent(accountId, intent, context = {}) {
       }
 
       const dupRes = await pool.query(
-        'SELECT 1 FROM accounts WHERE LOWER(email) = $1 AND account_id != $2 LIMIT 1',
+        `SELECT 1 FROM accounts WHERE LOWER(email) = $1 AND account_id != $2
+         UNION ALL
+         SELECT 1 FROM operator_settings WHERE LOWER(pending_email) = $1 AND account_id != $2
+         LIMIT 1`,
         [normalizedEmail, accountId]
       );
       if (dupRes.rows.length > 0) {
@@ -371,6 +382,21 @@ export async function processSettingsIntent(accountId, intent, context = {}) {
             updated_at = now()
         WHERE account_id = $2
       `, [deletionDate, accountId]);
+
+      await pool.query(`
+        UPDATE sessions
+        SET status = 'REVOKED'
+        WHERE account_id = $1
+          AND status = 'AUTHENTICATED'
+          AND ($2::uuid IS NULL OR session_id != $2)
+      `, [accountId, currentSessionId]);
+
+      try {
+        const { closeWebSocketsForTarget } = await import('../../websocket/server.mjs');
+        closeWebSocketsForTarget({ accountId, excludeSessionId: currentSessionId });
+      } catch {
+        // ignore
+      }
 
       return {
         requestId,

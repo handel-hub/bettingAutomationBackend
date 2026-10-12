@@ -24,7 +24,10 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
 
     // 1. If authenticatedSessionId provided, resolve account_id
     if (authenticatedSessionId) {
-      const sessionRes = await client.query('SELECT account_id FROM sessions WHERE session_id = $1 AND status IN (\'AUTHENTICATED\', \'PARTIAL\')', [authenticatedSessionId]);
+      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const sessionRes = UUID_REGEX.test(String(authenticatedSessionId))
+        ? await client.query('SELECT account_id FROM sessions WHERE session_id = $1 AND status IN (\'AUTHENTICATED\', \'PARTIAL\')', [authenticatedSessionId])
+        : { rows: [] };
       if (sessionRes.rows.length > 0) {
         accountId = sessionRes.rows[0].account_id;
       } else {
@@ -105,7 +108,7 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
       await client.query('SELECT account_id FROM accounts WHERE account_id = $1 FOR UPDATE', [accountId]);
 
       const licenseRes = await client.query(
-        "SELECT limits FROM licenses WHERE account_id = $1 AND status = 'VALID' ORDER BY issued_at DESC LIMIT 1",
+        "SELECT limits FROM licenses WHERE account_id = $1 AND status = 'VALID' AND (expires_at IS NULL OR expires_at > now()) ORDER BY issued_at DESC LIMIT 1",
         [accountId]
       );
       const maxMachines = licenseRes.rows[0]?.limits?.max_machines || 5;

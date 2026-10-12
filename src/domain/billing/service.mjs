@@ -191,6 +191,12 @@ export async function applyPaymentSuccess(client, {
   const ref = String(reference || `ref-${Date.now()}`).trim();
   const txIdStr = providerTxId ? String(providerTxId).trim() : ref;
 
+  // Serialize concurrent payment redemptions (/checkout/verify vs outbox webhook worker) for this account (F-04)
+  await runner.query(
+    'SELECT account_id FROM accounts WHERE account_id = $1 FOR UPDATE',
+    [accountId]
+  );
+
   // Canonical multi-alias replay & cross-account theft check (USF-02 / ADR-03)
   const candidateRefs = Array.from(new Set([ref, txIdStr, `inv-${ref}`, `inv-${txIdStr}`]));
   const existingInvRes = await runner.query(
@@ -210,7 +216,7 @@ export async function applyPaymentSuccess(client, {
 
   // Validate planId against subscription_plans / plan_entitlements (USF-02)
   const planCheckRes = await runner.query(
-    'SELECT plan_id FROM subscription_plans WHERE LOWER(plan_id) = $1',
+    'SELECT plan_id, entitlements FROM subscription_plans WHERE LOWER(plan_id) = $1',
     [normalizedPlanId]
   );
   const entRes = await runner.query(
@@ -227,7 +233,7 @@ export async function applyPaymentSuccess(client, {
   }
   const canonicalPlanId = planCheckRes.rows[0]?.plan_id || entRes.rows[0]?.plan_id || effectivePlanId;
 
-  // Fetch entitlements for capabilities & limits
+  // Fetch entitlements for capabilities & limits from authoritative plan_entitlements
   let capabilities = ['CAP_AUTOMATION_START', 'CAP_AUTOMATION_STOP', 'CAP_FILE_UPLOAD', 'CAP_TACTICAL_BET', 'CAP_CASH_OUT'];
   let limits = { max_machines: 5, max_concurrent_browsers: 5, risk_tier: 'LOW' };
   if (entRes.rows.length > 0) {
@@ -279,6 +285,7 @@ export async function applyPaymentSuccess(client, {
 
   // 2. Ensure license row exists and is VALID
   let licenseKey = `lic-${accountId}`;
+  let licenseExpiresAt = null;
   if (licCheck.rows.length > 0) {
     licenseKey = licCheck.rows[0].license_id || licenseKey;
     // Expire any other valid licenses for this account to preserve partial unique index
@@ -286,22 +293,27 @@ export async function applyPaymentSuccess(client, {
       `UPDATE licenses SET status = 'EXPIRED', updated_at = now() WHERE account_id = $1 AND status = 'VALID' AND license_id != $2`,
       [accountId, licenseKey]
     );
-    await runner.query(`
+    const updLicRes = await runner.query(`
       UPDATE licenses 
       SET status = 'VALID', plan_id = $1, capabilities = $2, limits = $3, expires_at = now() + interval '${periodInterval}',
           license_revision = license_revision + 1, updated_at = now()
       WHERE license_id = $4 AND status != 'REVOKED'
-    `, [effectivePlanId, JSON.stringify(capabilities), JSON.stringify(limits), licenseKey]);
+      RETURNING expires_at
+    `, [canonicalPlanId, JSON.stringify(capabilities), JSON.stringify(limits), licenseKey]);
+    licenseExpiresAt = updLicRes.rows[0]?.expires_at || null;
   } else {
     // Expire any existing valid license before insert
     await runner.query(
       `UPDATE licenses SET status = 'EXPIRED', updated_at = now() WHERE account_id = $1 AND status = 'VALID'`,
       [accountId]
     );
-    await runner.query(`
+    const insLicRes = await runner.query(`
       INSERT INTO licenses (account_id, plan_id, status, capabilities, limits, issued_at, expires_at, license_revision)
       VALUES ($1, $2, 'VALID', $3, $4, now(), now() + interval '${periodInterval}', 1)
-    `, [accountId, effectivePlanId, JSON.stringify(capabilities), JSON.stringify(limits)]);
+      RETURNING license_id, expires_at
+    `, [accountId, canonicalPlanId, JSON.stringify(capabilities), JSON.stringify(limits)]);
+    licenseKey = insLicRes.rows[0]?.license_id || licenseKey;
+    licenseExpiresAt = insLicRes.rows[0]?.expires_at || null;
   }
 
   // 3. Persist invoice record in invoices table (canonical id = inv-${txIdStr}, reference = ${ref})
@@ -312,13 +324,25 @@ export async function applyPaymentSuccess(client, {
   const taxAmount = Math.round((majorAmount - subtotal) * 100) / 100;
   const planNameResolved = normalizedPlanId.charAt(0).toUpperCase() + normalizedPlanId.slice(1).toLowerCase();
 
-  await runner.query(`
-    INSERT INTO invoices (
-      id, account_id, reference, amount, currency, status, paid_at, receipt_url,
-      subtotal, tax_amount, tax_rate, plan_name, billing_interval, currency_symbol
-    )
-    VALUES ($1, $2, $3, $4, 'NGN', 'Paid', now(), $5, $6, $7, $8, $9, $10, '₦')
-  `, [invId, accountId, ref, majorAmount, receiptUrl || null, subtotal, taxAmount, taxRate, planNameResolved, interval]);
+  try {
+    await runner.query(`
+      INSERT INTO invoices (
+        id, account_id, reference, amount, currency, status, paid_at, receipt_url,
+        subtotal, tax_amount, tax_rate, plan_name, billing_interval, currency_symbol
+      )
+      VALUES ($1, $2, $3, $4, 'NGN', 'Paid', now(), $5, $6, $7, $8, $9, $10, '₦')
+    `, [invId, accountId, ref, majorAmount, receiptUrl || null, subtotal, taxAmount, taxRate, planNameResolved, interval]);
+  } catch (invErr) {
+    if (invErr && invErr.code === '23505') {
+      const dupErr = new Error('Payment transaction reference has already been redeemed');
+      // @ts-ignore
+      dupErr.status = 409;
+      // @ts-ignore
+      dupErr.code = 'PAYMENT_ALREADY_REDEEMED';
+      throw dupErr;
+    }
+    throw invErr;
+  }
 
   // Broadcast to connected ACP / UI instances
   try {
@@ -352,6 +376,7 @@ export async function applyPaymentSuccess(client, {
     planId: normalizedPlanId,
     licenseId: licenseKey,
     licenseStatus: 'VALID',
+    expiresAt: licenseExpiresAt,
     capabilities,
     limits
   };

@@ -66,24 +66,28 @@ export async function validateEnvelope(raw, machinePublicKeyHex) {
   return { valid: true, isValid: true, envelope: raw, machine: matchedMachine };
 }
 
+import crypto from 'crypto';
+import { getSystemEpoch } from '../domain/system/epoch-store.mjs';
+
 /**
  * Build a signed response envelope to send to the client.
  * Matches Control Plane EnvelopeValidator verification format.
  * 
  * @param {any} payload 
  * @param {any} generation 
- * @param {number} [serverEpoch=1]
+ * @param {number} [serverEpoch]
  * @returns {Promise<any>}
  */
-export async function buildEnvelope(payload, generation, serverEpoch = 1) {
+export async function buildEnvelope(payload, generation, serverEpoch) {
   const activeKeyInfo = await getActiveKey();
   const kms = getKmsAdapter();
   const privateKey = await kms.getPrivateKey(activeKeyInfo.key_id);
   
   const envelope = {
     version: 2,
+    nonce: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
-    server_epoch: Number(serverEpoch),
+    server_epoch: Number(serverEpoch ?? getSystemEpoch()),
     payload,
     generation: Number(generation)
   };

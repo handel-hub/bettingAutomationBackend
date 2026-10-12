@@ -64,7 +64,7 @@ export async function assertActiveLicense(client, accountId, requiredCapability 
   if (activeLic) {
     if (requiredCapability) {
       const caps = Array.isArray(activeLic.capabilities) ? activeLic.capabilities : [];
-      if (caps.length > 0 && !caps.includes(requiredCapability)) {
+      if (!caps.includes(requiredCapability)) {
         const err = new Error(`License lacks required capability: ${requiredCapability}`);
         // @ts-ignore
         err.status = 403;

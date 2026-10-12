@@ -9,3 +9,4 @@ docs/hostile_audit_report.md
 .env
 .env
 .skills-lock.json
+/logs/*.log

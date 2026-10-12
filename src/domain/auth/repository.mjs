@@ -9,7 +9,8 @@ import { getPool } from '../../persistence/connection.mjs';
  * @returns {Promise<any>}
  */
 export async function getAccountByEmailForUpdate(client, email) {
-  const res = await client.query('SELECT * FROM accounts WHERE email = $1 FOR UPDATE', [email]);
+  const normalizedEmail = typeof email === 'string' ? email.trim() : email;
+  const res = await client.query('SELECT * FROM accounts WHERE LOWER(email) = LOWER($1) FOR UPDATE', [normalizedEmail]);
   return res.rows[0];
 }
 

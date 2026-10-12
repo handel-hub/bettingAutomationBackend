@@ -12,6 +12,19 @@ import { getPool } from '../../persistence/connection.mjs';
  * @param {Object} data.payload
  * @returns {Promise<Object>}
  */
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function resolveAccountOwnedMachineId(pool, accountId, machineId) {
+  if (!machineId || !UUID_REGEX.test(String(machineId))) {
+    return null;
+  }
+  const res = await pool.query(
+    'SELECT machine_id FROM machines WHERE machine_id = $1 AND account_id = $2',
+    [machineId, accountId]
+  );
+  return res.rows[0]?.machine_id || null;
+}
+
 export async function recordArbitrageAudit(accountId, data) {
   const pool = getPool();
   const {
@@ -26,6 +39,8 @@ export async function recordArbitrageAudit(accountId, data) {
     netProfitMargin = null,
     payload = {}
   } = data;
+
+  const resolvedMachineId = await resolveAccountOwnedMachineId(pool, accountId, machineId);
 
   const eventPayload = {
     eventType,
@@ -43,7 +58,7 @@ export async function recordArbitrageAudit(accountId, data) {
     RETURNING telemetry_id, account_id, machine_id, markets_scanned, execution_latency_ms,
               orders_accepted, orders_rejected, net_profit_margin, event_payload, recorded_at
   `, [
-    accountId, machineId, marketsScanned, executionLatencyMs,
+    accountId, resolvedMachineId, marketsScanned, executionLatencyMs,
     ordersAccepted, ordersRejected, netProfitMargin, JSON.stringify(eventPayload)
   ]);
 
@@ -111,24 +126,25 @@ export async function listArbitrageAudits(accountId, options = {}) {
 export async function recordHeartbeat(accountId, data) {
   const pool = getPool();
   const { machineId = null, telemetry = {}, recentLogs = [] } = data;
+  const resolvedMachineId = await resolveAccountOwnedMachineId(pool, accountId, machineId);
 
-  if (machineId) {
+  if (resolvedMachineId) {
     await pool.query(`
       UPDATE machines
       SET last_verified_at = now(), updated_at = now()
       WHERE machine_id = $1 AND account_id = $2
-    `, [machineId, accountId]);
+    `, [resolvedMachineId, accountId]);
   }
 
   const res = await pool.query(`
     INSERT INTO diagnostic_reports (account_id, machine_id, telemetry, recent_logs)
     VALUES ($1, $2, $3, $4)
     RETURNING report_id, created_at
-  `, [accountId, machineId, JSON.stringify(telemetry), JSON.stringify(recentLogs)]);
+  `, [accountId, resolvedMachineId, JSON.stringify(telemetry), JSON.stringify(recentLogs)]);
 
   return {
     reportId: res.rows[0].report_id,
-    machineId,
+    machineId: resolvedMachineId,
     status: 'RECORDED',
     timestamp: res.rows[0].created_at.toISOString()
   };

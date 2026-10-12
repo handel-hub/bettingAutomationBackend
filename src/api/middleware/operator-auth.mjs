@@ -60,7 +60,8 @@ export async function operatorAuth(req, res, next) {
       sessionId = sessionHeader.trim();
     }
 
-    if (sessionId) {
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (sessionId && UUID_REGEX.test(sessionId)) {
       const sessRes = await pool.query(`
         SELECT s.account_id, s.machine_id, s.status, s.expires_at,
                a.status as account_status, m.status as machine_status

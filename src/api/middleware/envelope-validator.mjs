@@ -105,6 +105,17 @@ export async function envelopeValidator(req, res, next) {
     
     // Look up accountId from session and verify expiry + active account status
     if (envelope.sessionId) {
+      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!UUID_REGEX.test(String(envelope.sessionId))) {
+        const err = new Error('SESSION_REVOKED');
+        // @ts-ignore
+        err.status = 401;
+        // @ts-ignore
+        err.code = 'BE_AUTH_SESSION_EXPIRED';
+        // @ts-ignore
+        err.legacyCode = 'SESSION_REVOKED';
+        throw err;
+      }
       const sessRes = await pool.query(
         `SELECT s.account_id, a.status AS account_status
          FROM sessions s

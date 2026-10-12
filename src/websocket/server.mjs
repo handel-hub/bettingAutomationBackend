@@ -54,7 +54,8 @@ export function initWebSocketServer(httpServer) {
                     req.headers['x-session-id'] || 
                     (req.headers['sec-websocket-protocol'] ? req.headers['sec-websocket-protocol'].split(',')[0].trim() : null);
 
-      if (!token) {
+      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!token || !UUID_REGEX.test(String(token))) {
         ws.close(1008, 'UNAUTHORIZED: Authentication token required');
         return;
       }

@@ -71,7 +71,8 @@ export function serializeBackendResponse(envelope) {
     timestamp: envelope.timestamp,
     server_epoch: Number(envelope.server_epoch ?? envelope.epoch ?? 1),
     payload: envelope.payload,
-    generation: Number(envelope.generation ?? 1)
+    generation: Number(envelope.generation ?? 1),
+    ...(envelope.nonce ? { nonce: String(envelope.nonce) } : {})
   };
   return Buffer.from(canonicalStringify(envelopeToSign), 'utf8');
 }

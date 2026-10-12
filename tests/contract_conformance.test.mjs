@@ -31,7 +31,7 @@ before(async () => {
   testAccountId = accRes.rows[0].account_id;
   await pool.query(
     `UPDATE licenses SET status = 'VALID', expires_at = now() + interval '30 days',
-     limits = COALESCE(limits, '{}'::jsonb) || '{"maxBettingAccounts": 1000}'::jsonb
+     limits = (COALESCE(limits, '{}'::jsonb) - 'allowedPlatformIds' - 'maxAccounts') || '{"maxBettingAccounts": 1000}'::jsonb
      WHERE account_id = $1`,
     [testAccountId]
   );
