@@ -60,10 +60,20 @@ async function handleCheckout(req, res, next) {
     const resolvedPlanName = plan ? plan.name : (targetPlanId.charAt(0).toUpperCase() + targetPlanId.slice(1));
     const resolvedPlanId = plan ? plan.plan_id : targetPlanId;
 
+    const effectiveReturnUrl = returnUrl || 'http://localhost:3000/workspace/billing';
+    try {
+      const parsedReturnUrl = new URL(String(effectiveReturnUrl));
+      if (parsedReturnUrl.protocol !== 'http:' && parsedReturnUrl.protocol !== 'https:') {
+        return res.status(400).json({ code: 'INVALID_RETURN_URL', error: 'returnUrl must use http or https protocol' });
+      }
+    } catch {
+      return res.status(400).json({ code: 'INVALID_RETURN_URL', error: 'Invalid returnUrl format' });
+    }
+
     const checkoutUrl = await initiateCheckout(
       accountId,
       resolvedPlanId,
-      returnUrl || 'http://localhost:3000/workspace/billing',
+      effectiveReturnUrl,
       idempotencyKey.toString(),
       interval
     );

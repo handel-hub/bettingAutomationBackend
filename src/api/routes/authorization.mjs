@@ -10,11 +10,13 @@ router.use(envelopeValidator);
 
 router.post('/resolve', async (req, res, next) => {
   try {
-    const { envelope } = req;
+    // @ts-ignore
+    const { envelope, machineId } = req;
+    const verifiedMachineId = machineId || envelope.machineId;
     
     const result = await resolve(
       envelope.sessionId,
-      envelope.machineId,
+      verifiedMachineId,
       envelope.clientGeneration
     );
     

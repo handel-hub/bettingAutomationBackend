@@ -235,6 +235,20 @@ export async function applyPaymentSuccess(client, {
     limits = entRes.rows[0].limits || limits;
   }
 
+  // Verify latest license has not been administratively REVOKED (CRITICAL-03 / REM-04)
+  const licCheck = await runner.query(
+    'SELECT license_id, status FROM licenses WHERE account_id = $1 ORDER BY expires_at DESC NULLS LAST, created_at DESC LIMIT 1 FOR UPDATE',
+    [accountId]
+  );
+  if (licCheck.rows.length > 0 && licCheck.rows[0].status === 'REVOKED') {
+    const err = new Error('License has been administratively revoked and cannot be reactivated without administrator clearance');
+    // @ts-ignore
+    err.status = 403;
+    // @ts-ignore
+    err.code = 'LICENSE_REVOKED';
+    throw err;
+  }
+
   // 1. Ensure subscription row exists and is ACTIVE
   const subCheck = await runner.query('SELECT subscription_id FROM subscriptions WHERE account_id = $1 ORDER BY current_period_end DESC, created_at DESC LIMIT 1', [accountId]);
   let subId;
@@ -265,7 +279,6 @@ export async function applyPaymentSuccess(client, {
 
   // 2. Ensure license row exists and is VALID
   let licenseKey = `lic-${accountId}`;
-  const licCheck = await runner.query('SELECT license_id FROM licenses WHERE account_id = $1 ORDER BY expires_at DESC NULLS LAST, created_at DESC LIMIT 1', [accountId]);
   if (licCheck.rows.length > 0) {
     licenseKey = licCheck.rows[0].license_id || licenseKey;
     // Expire any other valid licenses for this account to preserve partial unique index
@@ -277,7 +290,7 @@ export async function applyPaymentSuccess(client, {
       UPDATE licenses 
       SET status = 'VALID', plan_id = $1, capabilities = $2, limits = $3, expires_at = now() + interval '${periodInterval}',
           license_revision = license_revision + 1, updated_at = now()
-      WHERE license_id = $4
+      WHERE license_id = $4 AND status != 'REVOKED'
     `, [effectivePlanId, JSON.stringify(capabilities), JSON.stringify(limits), licenseKey]);
   } else {
     // Expire any existing valid license before insert

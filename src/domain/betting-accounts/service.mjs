@@ -127,7 +127,17 @@ export async function createBettingAccount(accountId, data) {
       WHERE account_id = $1 AND status = 'VALID' AND (expires_at IS NULL OR expires_at > now())
       ORDER BY issued_at DESC LIMIT 1
     `, [accountId]);
-    const maxAccounts = licRes.rows[0]?.limits?.maxAccounts ?? licRes.rows[0]?.limits?.max_accounts;
+    if (licRes.rows.length === 0) {
+      const err = new Error('Active valid license required to create betting accounts');
+      // @ts-ignore
+      err.status = 403;
+      // @ts-ignore
+      err.code = 'BE_PERM_LICENSE_EXPIRED';
+      throw err;
+    }
+
+    const limits = licRes.rows[0]?.limits || {};
+    const maxAccounts = limits.maxAccounts ?? limits.max_accounts;
     if (typeof maxAccounts === 'number' && maxAccounts > 0) {
       const currentCount = await countAccountsByAccount(client, accountId);
       if (currentCount >= maxAccounts) {
@@ -136,6 +146,28 @@ export async function createBettingAccount(accountId, data) {
         err.status = 403;
         // @ts-ignore
         err.code = 'ENTITLEMENT_LIMIT_REACHED';
+        throw err;
+      }
+    }
+
+    const allowedPlatforms = limits.allowedPlatformIds || limits.allowed_platform_ids || limits.allowedPlatforms;
+    if (
+      Array.isArray(allowedPlatforms) &&
+      allowedPlatforms.length > 0 &&
+      !allowedPlatforms.includes('*') &&
+      !allowedPlatforms.includes('ALL')
+    ) {
+      const normalizedPlatform = String(platformDisplayName).trim().toLowerCase();
+      const isAllowed = allowedPlatforms.some((p) => {
+        const normAllowed = String(p).trim().toLowerCase();
+        return normAllowed === normalizedPlatform || normalizedPlatform.includes(normAllowed);
+      });
+      if (!isAllowed) {
+        const err = new Error(`Platform "${platformDisplayName}" is not permitted by your current license tier`);
+        // @ts-ignore
+        err.status = 403;
+        // @ts-ignore
+        err.code = 'BE_PERM_ENTITLEMENT_EXCEEDED';
         throw err;
       }
     }

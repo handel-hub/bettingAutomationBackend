@@ -31,7 +31,7 @@ export async function authenticate(email, password, machineId, protocolVersion, 
       await logEvent(client, {
         eventType: 'LOGIN_FAILURE',
         severity: 'LOW',
-        actorType: 'ANONYMOUS',
+        actorType: 'USER',
         result: 'FAILURE',
         reason: 'unknown_account',
         metadata: { presentedEmail: email }
@@ -82,7 +82,18 @@ export async function authenticate(email, password, machineId, protocolVersion, 
 
     if (machineId) {
       const machineRes = await client.query(
-        "SELECT * FROM machines WHERE (machine_id::text = $1 OR installation_id = $1 OR descriptor->>'hardwareId' = $1) AND status != 'REVOKED' FOR UPDATE",
+        `SELECT * FROM machines
+         WHERE (machine_id::text = $1 OR installation_id = $1 OR descriptor->>'hardwareId' = $1)
+           AND status != 'REVOKED'
+         ORDER BY
+           CASE
+             WHEN machine_id::text = $1 THEN 1
+             WHEN installation_id = $1 THEN 2
+             ELSE 3
+           END ASC,
+           created_at ASC
+         LIMIT 1
+         FOR UPDATE`,
         [machineId]
       );
       

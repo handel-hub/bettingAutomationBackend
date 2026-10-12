@@ -8,9 +8,10 @@ import { getSystemEpoch } from '../system/epoch-store.mjs';
  * @param {any} presentedGeneration 
  * @param {number} [clientServerEpoch=1]
  * @param {any} [payload=null]
+ * @param {string|null} [accountId=null]
  * @returns {Promise<{resolution: string, action: string, serverEpoch: number, serverState: {session: number, machine: number}}>}
  */
-export async function reconcile(machineId, presentedGeneration, clientServerEpoch = 1, payload = null) {
+export async function reconcile(machineId, presentedGeneration, clientServerEpoch = 1, payload = null, accountId = null) {
   return withTransaction('READ COMMITTED', async (client) => {
     const res = await client.query('SELECT * FROM machine_session_states WHERE machine_id = $1', [machineId]);
     if (res.rows.length === 0) {
@@ -18,6 +19,14 @@ export async function reconcile(machineId, presentedGeneration, clientServerEpoc
     }
     
     const serverState = res.rows[0];
+    if (accountId && serverState.account_id && serverState.account_id !== accountId) {
+      const err = new Error('FORBIDDEN: Machine does not belong to authenticated account');
+      // @ts-ignore
+      err.status = 403;
+      // @ts-ignore
+      err.code = 'BE_AUTH_MACHINE_REVOKED';
+      throw err;
+    }
     const serverSessionGen = Number(serverState.session_generation);
     const serverMachineGen = Number(serverState.machine_generation);
     

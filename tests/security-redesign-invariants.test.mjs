@@ -11,12 +11,13 @@ import { authenticate } from '../src/app/authenticate.mjs';
 import { register } from '../src/domain/machine/service.mjs';
 import { renew, logout } from '../src/domain/session/service.mjs';
 import { resolve as resolveAuthorization } from '../src/domain/authorization/service.mjs';
-import { getAutomationSnapshot, updateGlobalConfig } from '../src/domain/automation/service.mjs';
+import { getAutomationSnapshot, updateGlobalConfig, updateAccountAutomationConfig } from '../src/domain/automation/service.mjs';
 import { applyPaymentSuccess } from '../src/domain/billing/service.mjs';
 import { revoke as executeRevocation } from '../src/domain/revocation/service.mjs';
 import { createBettingAccount } from '../src/domain/betting-accounts/service.mjs';
 import { broadcast } from '../src/websocket/server.mjs';
 import { createUpload } from '../src/adapters/storage/adapter.mjs';
+import { scheduleSubscriptions } from '../src/jobs/subscription-scheduler.mjs';
 
 const PORT = 3099;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
@@ -453,6 +454,158 @@ test('System-Wide Security Redesign Invariant Suite (SEC-INV-01 through SEC-INV-
     assert.strictEqual(restoreRes.status, 200, 'Restoring original password must succeed');
     const restoreBody = await restoreRes.json();
     assert.strictEqual(restoreBody.status, 'ACCEPTED');
+  });
+
+  await t.test('SEC-INV-07 (REM-01 through REM-05): HardwareId collision defense, reconciliation session gate, auth rate limiter, platform limits, revoked license payment guard, and system update RBAC', async () => {
+    const baseUrl = getServerBaseUrl();
+    const pool = getPool();
+
+    // 1. REM-01: Machine registration rejects mismatched descriptor.hardwareId (prevents hardwareId collision poisoning)
+    const rogueKp = crypto.generateKeyPairSync('ed25519');
+    const rogueSpki = rogueKp.publicKey.export({ type: 'spki', format: 'der' });
+    const roguePubHex = rogueSpki.subarray(rogueSpki.length - 32).toString('hex');
+    const rogueInstallId = `inst_${crypto.randomUUID()}`;
+    const rogueSig = sign(rogueKp.privateKey, Buffer.from(rogueInstallId, 'utf8'));
+    await assert.rejects(
+      async () => {
+        await register(rogueInstallId, roguePubHex, { os: 'win32', hardwareId: sharedMachineId }, rogueSig, null);
+      },
+      (err) => err.code === 'INVALID_FORMAT' && err.status === 400
+    );
+
+    // 2. REM-01: Sessionless /api/v1/reconciliation/sync envelope is rejected with 401
+    const recEnvelope = {
+      version: 2,
+      sessionId: null,
+      machineId: sharedMachineId,
+      nonce: `nonce-rec-${crypto.randomUUID()}`,
+      timestamp: new Date().toISOString(),
+      clientGeneration: 999999,
+      clientServerEpoch: 1,
+      payload: { localStateHash: 'abc' }
+    };
+    const recSig = sign(
+      sharedClientKeyPair.privateKey,
+      Buffer.from('CONTROL_PLANE_V1' + canonicalStringify(recEnvelope), 'utf8')
+    );
+    const recRes = await fetch(`${baseUrl}/api/v1/reconciliation/sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...recEnvelope, signature: recSig })
+    });
+    assert.strictEqual(recRes.status, 401, 'Sessionless reconciliation sync must be rejected with 401');
+
+    // 3. REM-02: Auth rate limiter enforces per-email limit on payload.email
+    const targetBruteEmail = `ratelimit-${crypto.randomUUID()}@example.com`;
+    let lastStatus = 0;
+    for (let i = 0; i < 6; i++) {
+      const rlRes = await fetch(`${baseUrl}/api/v1/auth/init`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          payload: {
+            email: targetBruteEmail,
+            password: 'WrongPassword123!'
+          }
+        })
+      });
+      lastStatus = rlRes.status;
+    }
+    assert.strictEqual(lastStatus, 429, '6th failed login attempt for the same payload.email must return 429');
+
+    // 4. REM-03: Enforces allowedPlatformIds and source whitelist
+    await pool.query(
+      `UPDATE licenses
+       SET limits = jsonb_set(COALESCE(limits, '{}'::jsonb), '{allowedPlatformIds}', '["SportyBet"]'::jsonb)
+       WHERE account_id = $1 AND status = 'VALID'`,
+      [TESTER_ACCOUNT_ID]
+    );
+    try {
+      await assert.rejects(
+        async () => {
+          await createBettingAccount(TESTER_ACCOUNT_ID, {
+            name: 'Disallowed Platform Account',
+            platformDisplayName: 'Pinnacle',
+            accountUsername: `pin_${crypto.randomUUID().slice(0, 8)}`,
+            accountPassword: 'pw'
+          });
+        },
+        (err) => err.code === 'BE_PERM_ENTITLEMENT_EXCEEDED' && err.status === 403
+      );
+    } finally {
+      await pool.query(
+        `UPDATE licenses
+         SET limits = limits - 'allowedPlatformIds'
+         WHERE account_id = $1 AND status = 'VALID'`,
+        [TESTER_ACCOUNT_ID]
+      );
+    }
+
+    await assert.rejects(
+      async () => {
+        // @ts-ignore
+        await updateAccountAutomationConfig(TESTER_ACCOUNT_ID, crypto.randomUUID(), 'pricing', 'INVALID_SOURCE', {});
+      },
+      (err) => err.code === 'BE_VAL_SCHEMA_VIOLATION' && err.status === 400
+    );
+
+    // 5. REM-04: Administratively REVOKED license cannot be self-reactivated via applyPaymentSuccess, and javascript: returnUrl is rejected
+    await pool.query("UPDATE licenses SET status = 'REVOKED' WHERE account_id = $1", [TESTER_ACCOUNT_ID]);
+    try {
+      await assert.rejects(
+        async () => {
+          await applyPaymentSuccess(undefined, {
+            accountId: TESTER_ACCOUNT_ID,
+            planId: 'pro',
+            amount: 49000,
+            reference: `ref-revoked-${crypto.randomUUID()}`
+          });
+        },
+        (err) => err.code === 'LICENSE_REVOKED' && err.status === 403
+      );
+    } finally {
+      await pool.query(
+        `UPDATE licenses SET status = 'VALID' WHERE license_id = (
+           SELECT license_id FROM licenses WHERE account_id = $1 ORDER BY issued_at DESC LIMIT 1
+         )`,
+        [TESTER_ACCOUNT_ID]
+      );
+    }
+
+    const badReturnUrlRes = await fetch(`${baseUrl}/api/v1/billing/checkout`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sharedSessionId}`,
+        'Idempotency-Key': `chk-xss-${crypto.randomUUID()}`
+      },
+      body: JSON.stringify({
+        planId: 'pro',
+        returnUrl: 'javascript:alert(1)'
+      })
+    });
+    assert.strictEqual(badReturnUrlRes.status, 400, 'javascript: returnUrl must be rejected with 400');
+
+    // 6. REM-05: POST /api/v1/system/restart-and-update requires SUPER_ADMIN or CAP_UPDATE_INSTALL
+    const opUpdateRes = await fetch(`${baseUrl}/api/v1/system/restart-and-update`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sharedSessionId}`
+      },
+      body: JSON.stringify({ targetVersion: 'v0.2.0' })
+    });
+    assert.strictEqual(opUpdateRes.status, 403, 'Operator without CAP_UPDATE_INSTALL must be rejected with 403');
+
+    const adminUpdateRes = await fetch(`${baseUrl}/api/v1/system/restart-and-update`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminToken}`
+      },
+      body: JSON.stringify({ targetVersion: 'v0.2.0' })
+    });
+    assert.strictEqual(adminUpdateRes.status, 200, 'SUPER_ADMIN must be permitted to trigger restart-and-update');
   });
 });
 

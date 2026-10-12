@@ -178,6 +178,14 @@ export async function updateAccountAutomationConfig(accountId, bettingAccountId,
   if (!['pricing', 'risk', 'rebet'].includes(category)) {
     throw new Error(`Invalid account automation category: ${category}`);
   }
+  if (!['GLOBAL', 'CUSTOM'].includes(source)) {
+    const err = new Error(`Invalid account automation source: ${source}`);
+    // @ts-ignore
+    err.status = 400;
+    // @ts-ignore
+    err.code = 'BE_VAL_SCHEMA_VIOLATION';
+    throw err;
+  }
   const colSource = `${category}_source`;
   const colCustom = `custom_${category}`;
 

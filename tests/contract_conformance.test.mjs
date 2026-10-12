@@ -24,8 +24,17 @@ before(async () => {
   }
 
   const pool = getPool();
-  const accRes = await pool.query('SELECT account_id FROM accounts LIMIT 1');
+  let accRes = await pool.query("SELECT account_id FROM accounts WHERE email = 'operator@bettingautomation.io' LIMIT 1");
+  if (accRes.rows.length === 0) {
+    accRes = await pool.query('SELECT account_id FROM accounts LIMIT 1');
+  }
   testAccountId = accRes.rows[0].account_id;
+  await pool.query(
+    `UPDATE licenses SET status = 'VALID', expires_at = now() + interval '30 days',
+     limits = COALESCE(limits, '{}'::jsonb) || '{"maxBettingAccounts": 1000}'::jsonb
+     WHERE account_id = $1`,
+    [testAccountId]
+  );
   const instId = `inst-contract-${Date.now()}`;
   const pubHex = crypto.randomBytes(32).toString('hex');
 

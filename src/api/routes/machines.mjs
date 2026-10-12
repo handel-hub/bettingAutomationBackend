@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { register } from '../../domain/machine/service.mjs';
 import { listMachinesByAccount, revokeMachine } from '../../domain/machine/repository.mjs';
 import { operatorAuth } from '../middleware/operator-auth.mjs';
+import { ipRateLimiter } from '../middleware/rate-limiter.mjs';
 import { buildEnvelope } from '../../protocol/envelope.mjs';
 
 const router = Router();
@@ -38,7 +39,7 @@ router.delete('/:machineId', operatorAuth, async (req, res, next) => {
   }
 });
 
-router.post('/register', async (req, res, next) => {
+router.post('/register', ipRateLimiter, async (req, res, next) => {
   try {
     const payload = (req.body && req.body.payload && typeof req.body.payload === 'object') ? req.body.payload : req.body;
     const { installationId, publicKeyHex, descriptor, selfSignature } = payload;

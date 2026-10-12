@@ -43,7 +43,24 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
     // CP signs `REGISTRATION:${hardwareId}` where installationId is `inst_${hardwareId}`
     const { verify } = await import('../../crypto/ed25519.mjs');
     const pubKeyBuffer = Buffer.from(publicKeyHex, 'hex');
-    const hardwareId = (descriptor && descriptor.hardwareId) || String(installationId).replace(/^inst_/, '');
+    const derivedHardwareId = String(installationId).replace(/^inst_/, '');
+    const safeDescriptor = (descriptor && typeof descriptor === 'object' && !Array.isArray(descriptor))
+      ? { ...descriptor }
+      : {};
+    if (
+      safeDescriptor.hardwareId &&
+      String(safeDescriptor.hardwareId) !== derivedHardwareId &&
+      String(safeDescriptor.hardwareId) !== String(installationId)
+    ) {
+      const err = new Error('Descriptor hardwareId does not match installationId');
+      // @ts-ignore
+      err.code = 'INVALID_FORMAT';
+      // @ts-ignore
+      err.status = 400;
+      throw err;
+    }
+    safeDescriptor.hardwareId = safeDescriptor.hardwareId || derivedHardwareId;
+    const hardwareId = safeDescriptor.hardwareId;
     const msg1 = Buffer.from(`REGISTRATION:${hardwareId}`, 'utf8');
     const msg2 = Buffer.from(String(installationId), 'utf8');
 
@@ -113,7 +130,7 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
       installationId,
       accountId,
       publicKeyHex,
-      descriptor
+      descriptor: safeDescriptor
     });
     
     // Insert initial generation state if account is bound

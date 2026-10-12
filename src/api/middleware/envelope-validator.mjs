@@ -39,7 +39,17 @@ export async function envelopeValidator(req, res, next) {
     
     const pool = getPool();
     const machineRes = await pool.query(
-      "SELECT machine_id, public_key_hex, status FROM machines WHERE (machine_id::text = $1 OR installation_id = $1 OR descriptor->>'hardwareId' = $1)",
+      `SELECT machine_id, account_id, public_key_hex, status
+       FROM machines
+       WHERE (machine_id::text = $1 OR installation_id = $1 OR descriptor->>'hardwareId' = $1)
+       ORDER BY
+         CASE
+           WHEN machine_id::text = $1 THEN 1
+           WHEN installation_id = $1 THEN 2
+           ELSE 3
+         END ASC,
+         created_at ASC
+       LIMIT 1`,
       [machineId]
     );
     if (machineRes.rows.length === 0) {
@@ -141,21 +151,24 @@ export async function envelopeValidator(req, res, next) {
         genErr.legacyCode = 'MISSING_CLIENT_GENERATION';
         throw genErr;
       }
-      const stateRes = await pool.query(
-        "SELECT session_generation, machine_generation FROM machine_session_states WHERE account_id = $1 AND machine_id = $2",
-        [req.accountId, matchedMachine.machine_id]
-      );
-      if (stateRes.rows.length > 0) {
-        const curGen = Number(stateRes.rows[0].session_generation);
-        if (envelope.clientGeneration !== curGen) {
-          const genErr = new Error('GENERATION_MISMATCH');
-          // @ts-ignore
-          genErr.status = 409;
-          // @ts-ignore
-          genErr.code = 'BE_REV_GENERATION_MISMATCH';
-          // @ts-ignore
-          genErr.legacyCode = 'GENERATION_MISMATCH';
-          throw genErr;
+      const isReconcileRoute = req.baseUrl?.endsWith('/reconciliation') || req.originalUrl?.includes('/reconciliation/');
+      if (!isReconcileRoute) {
+        const stateRes = await pool.query(
+          "SELECT session_generation, machine_generation FROM machine_session_states WHERE account_id = $1 AND machine_id = $2",
+          [req.accountId, matchedMachine.machine_id]
+        );
+        if (stateRes.rows.length > 0) {
+          const curGen = Number(stateRes.rows[0].session_generation);
+          if (envelope.clientGeneration !== curGen) {
+            const genErr = new Error('GENERATION_MISMATCH');
+            // @ts-ignore
+            genErr.status = 409;
+            // @ts-ignore
+            genErr.code = 'BE_REV_GENERATION_MISMATCH';
+            // @ts-ignore
+            genErr.legacyCode = 'GENERATION_MISMATCH';
+            throw genErr;
+          }
         }
       }
     }

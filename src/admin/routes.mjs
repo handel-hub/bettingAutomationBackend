@@ -2,11 +2,12 @@
 import { Router } from 'express';
 import { revoke } from '../domain/revocation/service.mjs';
 import { adminLogin, verifyAdminSession } from './service.mjs';
+import { ipRateLimiter, authAccountRateLimiter } from '../api/middleware/rate-limiter.mjs';
 
 const router = Router();
 
 // Public admin login route
-router.post('/login', async (req, res, next) => {
+router.post('/login', ipRateLimiter, authAccountRateLimiter, async (req, res, next) => {
   try {
     const { email, password, totpCode } = req.body;
     if (!email || !password || !totpCode) {

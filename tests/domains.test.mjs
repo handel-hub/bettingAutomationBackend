@@ -20,8 +20,17 @@ before(async () => {
   }
 
   const pool = getPool();
-  const accRes = await pool.query('SELECT account_id FROM accounts LIMIT 1');
+  let accRes = await pool.query("SELECT account_id FROM accounts WHERE email = 'operator@bettingautomation.io' LIMIT 1");
+  if (accRes.rows.length === 0) {
+    accRes = await pool.query('SELECT account_id FROM accounts LIMIT 1');
+  }
   const accountId = accRes.rows[0].account_id;
+  await pool.query(
+    `UPDATE licenses SET status = 'VALID', expires_at = now() + interval '30 days',
+     limits = COALESCE(limits, '{}'::jsonb) || '{"maxBettingAccounts": 1000}'::jsonb
+     WHERE account_id = $1`,
+    [accountId]
+  );
   const instId = `test-inst-domains-${Date.now()}`;
   const pubHex = crypto.randomBytes(32).toString('hex');
   const ins = await pool.query(`
@@ -194,7 +203,8 @@ test('Domains 1-7 API and WebSocket Integration Test Suite', async (t) => {
     assert.strictEqual(ver.currentVersion, 'v0.1.0-alpha');
     assert.strictEqual(ver.availableVersion, 'v0.2.0');
 
-    const restartRes = await fetch(`${BASE_URL}/system/restart-and-update`, {
+    // Unprivileged operator without CAP_UPDATE_INSTALL must be rejected with 403
+    const unprivRes = await fetch(`${BASE_URL}/system/restart-and-update`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders },
       body: JSON.stringify({
@@ -203,9 +213,35 @@ test('Domains 1-7 API and WebSocket Integration Test Suite', async (t) => {
         requestedAt: new Date().toISOString()
       })
     });
-    assert.strictEqual(restartRes.status, 200);
-    const restartData = await restartRes.json();
-    assert.strictEqual(restartData.status, 'ACCEPTED');
+    assert.strictEqual(unprivRes.status, 403);
+
+    // Grant CAP_UPDATE_INSTALL and verify 200 ACCEPTED
+    const pool = getPool();
+    await pool.query(
+      `UPDATE licenses SET capabilities = COALESCE(capabilities, '[]'::jsonb) || '["CAP_UPDATE_INSTALL"]'::jsonb
+       WHERE account_id = (SELECT account_id FROM sessions WHERE session_id = $1) AND status = 'VALID'`,
+      [testSessionId]
+    );
+    try {
+      const restartRes = await fetch(`${BASE_URL}/system/restart-and-update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({
+          type: 'SYSTEM_RESTART_AND_UPDATE',
+          targetVersion: 'v0.2.0',
+          requestedAt: new Date().toISOString()
+        })
+      });
+      assert.strictEqual(restartRes.status, 200);
+      const restartData = await restartRes.json();
+      assert.strictEqual(restartData.status, 'ACCEPTED');
+    } finally {
+      await pool.query(
+        `UPDATE licenses SET capabilities = COALESCE(capabilities, '[]'::jsonb) - 'CAP_UPDATE_INSTALL'
+         WHERE account_id = (SELECT account_id FROM sessions WHERE session_id = $1) AND status = 'VALID'`,
+        [testSessionId]
+      );
+    }
   });
 
   // 7. Domain 7: Customer Care & Diagnostics

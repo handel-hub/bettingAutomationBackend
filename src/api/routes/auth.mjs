@@ -2,10 +2,11 @@
 import { Router } from 'express';
 import { authenticate } from '../../app/authenticate.mjs';
 import { buildEnvelope } from '../../protocol/envelope.mjs';
+import { ipRateLimiter, authAccountRateLimiter } from '../middleware/rate-limiter.mjs';
 
 const router = Router();
 
-router.post('/init', async (req, res, next) => {
+router.post('/init', ipRateLimiter, authAccountRateLimiter, async (req, res, next) => {
   try {
     const payload = (req.body && req.body.payload && typeof req.body.payload === 'object') ? req.body.payload : req.body;
     const { email, password, machineId, protocolVersion, clientNonce } = payload;
@@ -45,7 +46,7 @@ router.post('/init', async (req, res, next) => {
   }
 });
 
-router.post('/register', async (req, res, next) => {
+router.post('/register', ipRateLimiter, authAccountRateLimiter, async (req, res, next) => {
   try {
     const payload = (req.body && req.body.payload && typeof req.body.payload === 'object') ? req.body.payload : req.body;
     const { email, password, name, machineId, protocolVersion, clientNonce } = payload || {};
