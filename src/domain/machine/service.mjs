@@ -39,24 +39,7 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
       }
     }
     
-    // 2. Check for duplicate installationId / publicKeyHex (idempotent registration)
-    const existing = await findByInstallationAndPublicKey(client, installationId, publicKeyHex);
-    if (existing) {
-      return existing;
-    }
-    
-    // 3. Clone detection (same installation_id, different public_key)
-    const clones = await findClones(client, installationId, publicKeyHex);
-    if (clones.length > 0) {
-      const err = new Error('CLONE_SUSPECTED');
-      // @ts-ignore
-      err.code = 'CLONE_SUSPECTED';
-      // @ts-ignore
-      err.status = 403;
-      throw err;
-    }
-    
-    // 4. Verify selfSignature using publicKeyHex
+    // 2. Verify selfSignature using publicKeyHex BEFORE returning existing record or checking clones (USF-10 / HIGH-06)
     // CP signs `REGISTRATION:${hardwareId}` where installationId is `inst_${hardwareId}`
     const { verify } = await import('../../crypto/ed25519.mjs');
     const pubKeyBuffer = Buffer.from(publicKeyHex, 'hex');
@@ -77,6 +60,23 @@ export async function register(installationId, publicKeyHex, descriptor, selfSig
       const err = new Error('Invalid self-signature');
       // @ts-ignore
       err.code = 'INVALID_SIGNATURE';
+      // @ts-ignore
+      err.status = 403;
+      throw err;
+    }
+
+    // 3. Check for duplicate installationId / publicKeyHex (idempotent registration after signature verification)
+    const existing = await findByInstallationAndPublicKey(client, installationId, publicKeyHex);
+    if (existing) {
+      return existing;
+    }
+    
+    // 4. Clone detection (same installation_id, different public_key)
+    const clones = await findClones(client, installationId, publicKeyHex);
+    if (clones.length > 0) {
+      const err = new Error('CLONE_SUSPECTED');
+      // @ts-ignore
+      err.code = 'CLONE_SUSPECTED';
       // @ts-ignore
       err.status = 403;
       throw err;

@@ -122,9 +122,9 @@ export async function processSettingsIntent(accountId, intent) {
         };
       }
 
-      const accRes = await pool.query('SELECT password_hash FROM accounts WHERE account_id = $1', [accountId]);
-      const valid = accRes.rows[0]?.password_hash
-        ? await verifyPassword(String(secret), accRes.rows[0].password_hash).catch(() => false)
+      const accRes = await pool.query('SELECT credentials_hash FROM accounts WHERE account_id = $1', [accountId]);
+      const valid = accRes.rows[0]?.credentials_hash
+        ? await verifyPassword(String(secret), accRes.rows[0].credentials_hash).catch(() => false)
         : false;
       if (!valid) {
         return { requestId, status: 'CHALLENGE_FAILED', section: 'SECURITY', message: 'Current password is incorrect' };
@@ -175,17 +175,17 @@ export async function processSettingsIntent(accountId, intent) {
         return { requestId, status: 'REJECTED', section: 'SECURITY', message: 'New password must be at least 8 characters' };
       }
 
-      // Check current password against password_hash
-      const accRes = await pool.query('SELECT password_hash FROM accounts WHERE account_id = $1', [accountId]);
-      const valid = accRes.rows[0]?.password_hash
-        ? await verifyPassword(String(currentPassword), accRes.rows[0].password_hash).catch(() => false)
+      // Check current password against credentials_hash
+      const accRes = await pool.query('SELECT credentials_hash FROM accounts WHERE account_id = $1', [accountId]);
+      const valid = accRes.rows[0]?.credentials_hash
+        ? await verifyPassword(String(currentPassword), accRes.rows[0].credentials_hash).catch(() => false)
         : false;
       if (!valid) {
         return { requestId, status: 'CHALLENGE_FAILED', section: 'SECURITY', message: 'Current password is incorrect' };
       }
 
       const newHash = await hashPassword(String(newPassword));
-      await pool.query('UPDATE accounts SET password_hash = $1, updated_at = now() WHERE account_id = $2', [newHash, accountId]);
+      await pool.query('UPDATE accounts SET credentials_hash = $1, updated_at = now() WHERE account_id = $2', [newHash, accountId]);
 
       return {
         requestId,
@@ -197,6 +197,27 @@ export async function processSettingsIntent(accountId, intent) {
 
     case 'CONFIGURE_MFA': {
       const { enabled } = payload;
+      if (!enabled) {
+        const curMfaRes = await pool.query('SELECT mfa_enabled FROM operator_settings WHERE account_id = $1', [accountId]);
+        if (curMfaRes.rows[0]?.mfa_enabled) {
+          const secret = stepUpSecret || payload.currentPassword;
+          if (!secret) {
+            return {
+              requestId,
+              status: 'REQUIRES_STEP_UP',
+              section: 'SECURITY',
+              message: 'Step-up authorization required to disable two-factor authentication'
+            };
+          }
+          const accRes = await pool.query('SELECT credentials_hash FROM accounts WHERE account_id = $1', [accountId]);
+          const valid = accRes.rows[0]?.credentials_hash
+            ? await verifyPassword(String(secret), accRes.rows[0].credentials_hash).catch(() => false)
+            : false;
+          if (!valid) {
+            return { requestId, status: 'CHALLENGE_FAILED', section: 'SECURITY', message: 'Current password is incorrect' };
+          }
+        }
+      }
       await pool.query(`
         UPDATE operator_settings
         SET mfa_enabled = $1, updated_at = now()
@@ -217,6 +238,23 @@ export async function processSettingsIntent(accountId, intent) {
         SET status = 'REVOKED'
         WHERE account_id = $1 AND status = 'AUTHENTICATED'
       `, [accountId]);
+      await pool.query(`
+        UPDATE authorizations
+        SET status = 'REVOKED', updated_at = now()
+        WHERE account_id = $1 AND status = 'VALID'
+      `, [accountId]);
+      await pool.query(`
+        UPDATE machine_session_states
+        SET session_generation = session_generation + 1, updated_at = now()
+        WHERE account_id = $1
+      `, [accountId]);
+
+      try {
+        const { closeWebSocketsForTarget } = await import('../../websocket/server.mjs');
+        closeWebSocketsForTarget({ accountId });
+      } catch {
+        // ignore
+      }
 
       return {
         requestId,
@@ -227,7 +265,8 @@ export async function processSettingsIntent(accountId, intent) {
     }
 
     case 'DELETE_ACCOUNT': {
-      if (!stepUpSecret) {
+      const secret = stepUpSecret || payload?.currentPassword;
+      if (!secret) {
         return {
           requestId,
           status: 'REQUIRES_STEP_UP',
@@ -236,9 +275,9 @@ export async function processSettingsIntent(accountId, intent) {
         };
       }
 
-      const accRes = await pool.query('SELECT password_hash FROM accounts WHERE account_id = $1', [accountId]);
-      const valid = accRes.rows[0]?.password_hash
-        ? await verifyPassword(String(stepUpSecret), accRes.rows[0].password_hash).catch(() => false)
+      const accRes = await pool.query('SELECT credentials_hash FROM accounts WHERE account_id = $1', [accountId]);
+      const valid = accRes.rows[0]?.credentials_hash
+        ? await verifyPassword(String(secret), accRes.rows[0].credentials_hash).catch(() => false)
         : false;
       if (!valid) {
         return { requestId, status: 'CHALLENGE_FAILED', section: 'SECURITY', message: 'Incorrect password confirmation' };
