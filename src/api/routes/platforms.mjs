@@ -1,5 +1,7 @@
 // @ts-check
 import { Router } from 'express';
+import { operatorAuth } from '../middleware/operator-auth.mjs';
+import { requireAdmin } from '../../admin/routes.mjs';
 import {
   getPlatformRegistrySnapshot,
   getPlatformById,
@@ -9,8 +11,8 @@ import {
 
 const router = Router();
 
-// GET /api/v1/platforms (Public / Authenticated catalog)
-router.get('/', async (req, res, next) => {
+// GET /api/v1/platforms (Authenticated operator catalog)
+router.get('/', operatorAuth, async (req, res, next) => {
   try {
     const snapshot = await getPlatformRegistrySnapshot();
     res.json(snapshot);
@@ -20,7 +22,7 @@ router.get('/', async (req, res, next) => {
 });
 
 // GET /api/v1/platforms/:id
-router.get('/:id', async (req, res, next) => {
+router.get('/:id', operatorAuth, async (req, res, next) => {
   try {
     const platform = await getPlatformById(req.params.id);
     if (!platform) {
@@ -32,8 +34,8 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-// POST /api/v1/platforms - Add/Update platform dynamically (TEST-RES-04)
-router.post('/', async (req, res, next) => {
+// POST /api/v1/platforms - Add/Update platform dynamically (Admin only)
+router.post('/', requireAdmin('SUPER_ADMIN'), async (req, res, next) => {
   try {
     const created = await upsertPlatform(req.body);
     res.status(201).json(created);
@@ -42,8 +44,8 @@ router.post('/', async (req, res, next) => {
   }
 });
 
-// PATCH /api/v1/platforms/:id/status
-router.patch('/:id/status', async (req, res, next) => {
+// PATCH /api/v1/platforms/:id/status (Admin only)
+router.patch('/:id/status', requireAdmin('SUPER_ADMIN'), async (req, res, next) => {
   try {
     const { status, isAvailable } = req.body;
     const ok = await updatePlatformStatus(req.params.id, status, isAvailable);

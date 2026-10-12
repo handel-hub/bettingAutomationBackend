@@ -243,11 +243,15 @@ export async function listMachinesByAccount(client, accountId) {
  */
 export async function revokeMachine(client, machineId, accountId = null) {
   const runner = client || getPool();
-  await runner.query(`
+  const updRes = await runner.query(`
     UPDATE machines 
     SET status = 'REVOKED', revoked_at = now() 
     WHERE machine_id = $1 AND ($2::uuid IS NULL OR account_id = $2)
+    RETURNING machine_id, account_id
   `, [machineId, accountId || null]);
+  if (updRes.rows.length === 0) {
+    return;
+  }
   await runner.query(`
     UPDATE sessions
     SET status = 'REVOKED'

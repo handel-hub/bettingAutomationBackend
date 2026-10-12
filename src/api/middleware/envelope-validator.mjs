@@ -54,7 +54,7 @@ export async function envelopeValidator(req, res, next) {
     }
     
     const matchedMachine = machineRes.rows[0];
-    if (matchedMachine.status === 'REVOKED') {
+    if (matchedMachine.status !== 'REGISTERED') {
       const err = new Error('MACHINE_REVOKED');
       // @ts-ignore
       err.status = 403;
@@ -93,13 +93,29 @@ export async function envelopeValidator(req, res, next) {
       throw err;
     }
     
-    // Look up accountId from session
+    // Look up accountId from session and verify expiry + active account status
     if (envelope.sessionId) {
       const sessRes = await pool.query(
-        "SELECT account_id FROM sessions WHERE session_id = $1 AND machine_id = $2 AND status = 'AUTHENTICATED'",
+        `SELECT s.account_id, a.status AS account_status
+         FROM sessions s
+         JOIN accounts a ON s.account_id = a.account_id
+         WHERE s.session_id = $1
+           AND s.machine_id = $2
+           AND s.status = 'AUTHENTICATED'
+           AND (s.expires_at IS NULL OR s.expires_at > now())`,
         [envelope.sessionId, matchedMachine.machine_id]
       );
       if (sessRes.rows.length > 0) {
+        if (sessRes.rows[0].account_status !== 'ACTIVE') {
+          const err = new Error('ACCOUNT_LOCKED');
+          // @ts-ignore
+          err.status = 403;
+          // @ts-ignore
+          err.code = 'BE_AUTH_ACCOUNT_LOCKED';
+          // @ts-ignore
+          err.legacyCode = 'ACCOUNT_LOCKED';
+          throw err;
+        }
         req.accountId = sessRes.rows[0].account_id;
       } else {
         const err = new Error('SESSION_REVOKED');
@@ -113,8 +129,18 @@ export async function envelopeValidator(req, res, next) {
       }
     }
 
-    // Monotonic generation validation if generation is tracked (INV-06: reject counter divergence)
-    if (envelope.sessionId && req.accountId && typeof envelope.clientGeneration === 'number') {
+    // Monotonic generation validation (INV-06: require clientGeneration on authenticated session envelopes)
+    if (envelope.sessionId && req.accountId) {
+      if (typeof envelope.clientGeneration !== 'number' || !Number.isInteger(envelope.clientGeneration)) {
+        const genErr = new Error('MISSING_CLIENT_GENERATION');
+        // @ts-ignore
+        genErr.status = 400;
+        // @ts-ignore
+        genErr.code = 'BE_VAL_SCHEMA_VIOLATION';
+        // @ts-ignore
+        genErr.legacyCode = 'MISSING_CLIENT_GENERATION';
+        throw genErr;
+      }
       const stateRes = await pool.query(
         "SELECT session_generation, machine_generation FROM machine_session_states WHERE account_id = $1 AND machine_id = $2",
         [req.accountId, matchedMachine.machine_id]

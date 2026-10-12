@@ -26,9 +26,18 @@ export async function renew(sessionId, machineId, presentedGenerationState, clie
       throw new Error('AUTH_FAILED');
     }
     
-    if (session.status === 'EXPIRED' || session.status === 'REVOKED' || session.status === 'LOGGED_OUT') {
-      const err = new Error('Session is inactive');
+    if (session.status !== 'AUTHENTICATED' || (session.expires_at && new Date(session.expires_at) <= new Date())) {
+      const err = new Error('Session is inactive or expired');
+      // @ts-ignore
       err.status = 401;
+      throw err;
+    }
+
+    const acctRes = await client.query('SELECT status FROM accounts WHERE account_id = $1', [session.account_id]);
+    if (acctRes.rows.length === 0 || acctRes.rows[0].status !== 'ACTIVE') {
+      const err = new Error('Account is inactive or locked');
+      // @ts-ignore
+      err.status = 403;
       throw err;
     }
     
@@ -130,12 +139,39 @@ export async function revoke(sessionId, reason) {
  * @param {string} sessionId 
  * @param {string} machineId 
  */
-export async function logout(sessionId, machineId) {
-  return withTransaction('READ COMMITTED', async (client) => {
-    await client.query(`
+export async function logout(sessionId, machineId = null) {
+  const res = await withTransaction('READ COMMITTED', async (client) => {
+    const sessRes = await client.query(`
       UPDATE sessions 
       SET status = 'LOGGED_OUT'
-      WHERE session_id = $1 AND machine_id = $2
-    `, [sessionId, machineId]);
+      WHERE session_id = $1 AND ($2::uuid IS NULL OR machine_id = $2)
+      RETURNING account_id, machine_id
+    `, [sessionId, machineId || null]);
+
+    await client.query(`
+      UPDATE authorizations
+      SET status = 'REVOKED', updated_at = now()
+      WHERE session_id = $1 AND status = 'VALID'
+    `, [sessionId]);
+
+    if (sessRes.rows.length > 0) {
+      const targetMachineId = machineId || sessRes.rows[0].machine_id;
+      if (targetMachineId) {
+        await client.query(`
+          UPDATE machine_session_states
+          SET session_generation = session_generation + 1, updated_at = now()
+          WHERE account_id = $1 AND machine_id = $2
+        `, [sessRes.rows[0].account_id, targetMachineId]);
+      }
+    }
+    return sessRes.rows[0];
   });
+
+  try {
+    const { closeWebSocketsForTarget } = await import('../../websocket/server.mjs');
+    closeWebSocketsForTarget({ sessionId });
+  } catch {
+    // ignore if ws server not initialized
+  }
+  return res;
 }

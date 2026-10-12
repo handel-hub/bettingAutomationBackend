@@ -1,6 +1,7 @@
 // @ts-check
 import { Router } from 'express';
 import { operatorAuth } from '../middleware/operator-auth.mjs';
+import { requireAdmin } from '../../admin/routes.mjs';
 import {
   getCustomerCareSnapshot,
   createTicket,
@@ -10,6 +11,18 @@ import {
 import crypto from 'crypto';
 
 const router = Router();
+
+// POST /api/v1/support/channels - Upsert support contact channel (Admin only)
+router.post('/channels', requireAdmin('SUPER_ADMIN'), async (req, res, next) => {
+  try {
+    const { upsertSupportChannel } = await import('../../domain/support/service.mjs');
+    const channel = await upsertSupportChannel(req.body);
+    res.status(201).json(channel);
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.use(operatorAuth);
 
 // GET /api/v1/support/snapshot
@@ -80,17 +93,6 @@ router.get('/channels', async (req, res, next) => {
     const { listSupportChannels } = await import('../../domain/support/service.mjs');
     const channels = await listSupportChannels();
     res.json(channels);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// POST /api/v1/support/channels - Upsert support contact channel (admin/ops)
-router.post('/channels', async (req, res, next) => {
-  try {
-    const { upsertSupportChannel } = await import('../../domain/support/service.mjs');
-    const channel = await upsertSupportChannel(req.body);
-    res.status(201).json(channel);
   } catch (err) {
     next(err);
   }

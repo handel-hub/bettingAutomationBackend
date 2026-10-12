@@ -20,7 +20,7 @@ router.post('/login', async (req, res, next) => {
 });
 
 // Admin authentication middleware
-const requireAdmin = (requiredRole = 'SUPPORT') => {
+export const requireAdmin = (requiredRole = 'SUPPORT') => {
   return async (req, res, next) => {
     try {
       const authHeader = req.headers['authorization'];

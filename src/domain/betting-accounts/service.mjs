@@ -19,11 +19,8 @@ import {
  */
 function getMasterVaultKey() {
   const secret = process.env.KMS_LOCAL_SECRET;
-  if (!secret) {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('FATAL: KMS_LOCAL_SECRET environment variable is required in production');
-    }
-    return crypto.createHash('sha256').update('betting_automation_master_vault_key_32').digest();
+  if (!secret || secret.trim().length < 16) {
+    throw new Error('FATAL: KMS_LOCAL_SECRET environment variable (>= 16 chars) is required for vault credential encryption');
   }
   return crypto.createHash('sha256').update(secret).digest();
 }
@@ -125,6 +122,24 @@ export async function createBettingAccount(accountId, data) {
   const { nonce, ciphertext, tag } = encrypt(getMasterVaultKey(), Buffer.from(accountPassword, 'utf8'), aad);
 
   return withTransaction('READ COMMITTED', async (client) => {
+    const licRes = await client.query(`
+      SELECT limits FROM licenses
+      WHERE account_id = $1 AND status = 'VALID' AND (expires_at IS NULL OR expires_at > now())
+      ORDER BY issued_at DESC LIMIT 1
+    `, [accountId]);
+    const maxAccounts = licRes.rows[0]?.limits?.maxAccounts ?? licRes.rows[0]?.limits?.max_accounts;
+    if (typeof maxAccounts === 'number' && maxAccounts > 0) {
+      const currentCount = await countAccountsByAccount(client, accountId);
+      if (currentCount >= maxAccounts) {
+        const err = new Error(`Plan limit reached: maximum of ${maxAccounts} betting accounts allowed`);
+        // @ts-ignore
+        err.status = 403;
+        // @ts-ignore
+        err.code = 'ENTITLEMENT_LIMIT_REACHED';
+        throw err;
+      }
+    }
+
     const acc = await insertAccount(client, {
       id,
       accountId,

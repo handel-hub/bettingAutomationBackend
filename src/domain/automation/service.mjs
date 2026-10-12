@@ -10,14 +10,20 @@ import crypto from 'crypto';
 export async function getAutomationSnapshot(accountId) {
   const pool = getPool();
 
-  // 1. Fetch Global Config
-  const configRes = await pool.query('SELECT * FROM global_automation_configs WHERE id = $1', ['primary']);
+  // 1. Fetch Tenant-Isolated Global Config (falling back to 'primary' defaults)
+  const configRes = await pool.query(
+    `SELECT * FROM global_automation_configs
+     WHERE id IN ($1, 'primary')
+     ORDER BY (id = $1) DESC
+     LIMIT 1`,
+    [String(accountId || 'primary')]
+  );
   const globalConfigRow = configRes.rows[0] || {};
 
   // 2. Fetch Active License & Capabilities
   const licenseRes = await pool.query(`
     SELECT capabilities, limits FROM licenses
-    WHERE account_id = $1 AND status = 'VALID'
+    WHERE account_id = $1 AND status = 'VALID' AND (expires_at IS NULL OR expires_at > now())
     ORDER BY issued_at DESC LIMIT 1
   `, [accountId]);
   const license = licenseRes.rows[0];
@@ -70,13 +76,20 @@ export async function getAutomationSnapshot(accountId) {
 }
 
 /**
- * Update a global config category (pricing, risk, rebet, etc.)
+ * Update a global config category (pricing, risk, rebet, etc.) isolated per tenant accountId
  * @param {string} accountId 
  * @param {string} category 
  * @param {Object} values 
  * @returns {Promise<Object>}
  */
 export async function updateGlobalConfig(accountId, category, values) {
+  if (!accountId) {
+    const err = new Error('Account ID is required to update automation configuration');
+    // @ts-ignore
+    err.status = 401;
+    throw err;
+  }
+
   const validColumns = {
     pricing: 'pricing',
     risk: 'risk',
@@ -93,12 +106,31 @@ export async function updateGlobalConfig(accountId, category, values) {
   if (!col) throw new Error(`Invalid configuration category: ${category}`);
 
   const pool = getPool();
+  const tenantId = String(accountId);
+
+  // Seed tenant-isolated row from 'primary' template if it does not yet exist
+  await pool.query(`
+    INSERT INTO global_automation_configs (id, pricing, risk, rebet, proxy, execution, browser_spawning, advanced_runtime, updated_at)
+    SELECT $1,
+           COALESCE(p.pricing, '{}'::jsonb),
+           COALESCE(p.risk, '{}'::jsonb),
+           COALESCE(p.rebet, '{}'::jsonb),
+           COALESCE(p.proxy, '{}'::jsonb),
+           COALESCE(p.execution, '{}'::jsonb),
+           COALESCE(p.browser_spawning, '{}'::jsonb),
+           COALESCE(p.advanced_runtime, '{}'::jsonb),
+           now()
+    FROM (SELECT 1) AS dummy
+    LEFT JOIN global_automation_configs p ON p.id = 'primary'
+    ON CONFLICT (id) DO NOTHING
+  `, [tenantId]);
+
   const res = await pool.query(`
     UPDATE global_automation_configs
-    SET ${col} = ${col} || $1::jsonb, updated_at = now()
-    WHERE id = 'primary'
+    SET ${col} = COALESCE(${col}, '{}'::jsonb) || $1::jsonb, updated_at = now()
+    WHERE id = $2
     RETURNING *
-  `, [JSON.stringify(values)]);
+  `, [JSON.stringify(values), tenantId]);
 
   const updated = res.rows[0];
   return {
@@ -143,6 +175,9 @@ export async function toggleBetCycle(accountId, bettingAccountId, enabled) {
  * @returns {Promise<Object>}
  */
 export async function updateAccountAutomationConfig(accountId, bettingAccountId, category, source, values) {
+  if (!['pricing', 'risk', 'rebet'].includes(category)) {
+    throw new Error(`Invalid account automation category: ${category}`);
+  }
   const colSource = `${category}_source`;
   const colCustom = `custom_${category}`;
 

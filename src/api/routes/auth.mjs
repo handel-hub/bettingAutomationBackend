@@ -79,7 +79,7 @@ router.post('/register', async (req, res, next) => {
 
     const passwordHash = await hashPassword(password);
     const insertRes = await pool.query(
-      `INSERT INTO accounts (email, password_hash, status) VALUES ($1, $2, 'ACTIVE') RETURNING account_id`,
+      `INSERT INTO accounts (email, credentials_hash, status) VALUES ($1, $2, 'ACTIVE') RETURNING account_id`,
       [normalizedEmail, passwordHash]
     );
     const accountId = insertRes.rows[0].account_id;
@@ -89,8 +89,8 @@ router.post('/register', async (req, res, next) => {
       : normalizedEmail.split('@')[0];
 
     await pool.query(
-      `INSERT INTO operator_settings (account_id, name, theme, density)
-       VALUES ($1, $2, 'light', 'comfortable')
+      `INSERT INTO operator_settings (account_id, name)
+       VALUES ($1, $2)
        ON CONFLICT (account_id) DO NOTHING`,
       [accountId, operatorName]
     );

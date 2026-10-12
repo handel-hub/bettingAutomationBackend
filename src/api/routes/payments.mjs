@@ -1,5 +1,6 @@
 // @ts-check
 import { Router } from 'express';
+import { operatorAuth } from '../middleware/operator-auth.mjs';
 import { initiateCheckout } from '../../domain/payment/service.mjs';
 import { handleWebhook } from '../../domain/payment/webhook-handler.mjs';
 import { getProvider } from '../../domain/payment/provider.mjs';
@@ -7,11 +8,29 @@ import { getPool } from '../../persistence/connection.mjs';
 
 const router = Router();
 
+/**
+ * @param {any} str
+ * @returns {string}
+ */
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Endpoint for initiating a checkout (synchronous to provider, NO state mutation)
-router.post('/checkout', async (req, res, next) => {
+router.post('/checkout', operatorAuth, async (req, res, next) => {
   try {
-    // In reality, authenticate the user to get accountId
-    const { accountId, planId, returnUrl } = req.body || {};
+    // @ts-ignore
+    const authenticatedAccountId = req.accountId;
+    const { accountId: bodyAccountId, planId, returnUrl } = req.body || {};
+    if (bodyAccountId && bodyAccountId !== authenticatedAccountId) {
+      return res.status(403).json({ error: 'Cannot initiate checkout for a different account' });
+    }
+    const accountId = authenticatedAccountId;
     const idempotencyKey = req.headers['idempotency-key'] || req.body?.idempotencyKey;
     if (!idempotencyKey) {
       return res.status(400).json({
@@ -34,8 +53,8 @@ router.post('/checkout', async (req, res, next) => {
 
 // Callback redirect target for customer browser after payment
 router.get('/callback', (req, res) => {
-  const reference = req.query.reference || req.query.trxref || req.query.tx_ref || req.query.transaction_id || 'N/A';
-  const status = req.query.status || 'success';
+  const reference = escapeHtml(req.query.reference || req.query.trxref || req.query.tx_ref || req.query.transaction_id || 'N/A');
+  const status = escapeHtml(req.query.status || 'success');
   res.send(`
     <html>
       <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
@@ -116,8 +135,9 @@ router.post('/webhook', async (req, res, next) => {
       }
     }
     
-    // Fallback: lookup by customer email
-    if (!accountId && req.body.data?.customer?.email) {
+    // Do NOT allow unverified customer.email fallback on failed charges (prevents cross-tenant PAST_DUE DoS - USF-03)
+    const isFailedEvent = eventType === 'charge.failed' || eventType.includes('fail') || eventType.includes('declined');
+    if (!accountId && !isFailedEvent && req.body.data?.customer?.email) {
       const pool = getPool();
       const accRes = await pool.query('SELECT account_id FROM accounts WHERE email = $1', [req.body.data.customer.email]);
       if (accRes.rows.length > 0) {

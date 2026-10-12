@@ -64,14 +64,20 @@ export function initWebSocketServer(httpServer) {
       let authenticatedSessionId = null;
 
       const sessRes = await pool.query(`
-        SELECT s.session_id, s.account_id, s.status, s.expires_at, a.status as account_status
+        SELECT s.session_id, s.account_id, s.machine_id, s.status, s.expires_at,
+               a.status as account_status, m.status as machine_status
         FROM sessions s
         JOIN accounts a ON s.account_id = a.account_id
+        LEFT JOIN machines m ON s.machine_id = m.machine_id
         WHERE s.session_id = $1 AND s.status = 'AUTHENTICATED' AND s.expires_at > now()
       `, [token]);
 
-      if (sessRes.rows.length === 0 || sessRes.rows[0].account_status === 'LOCKED') {
-        ws.close(1008, 'UNAUTHORIZED: Invalid or expired session');
+      if (
+        sessRes.rows.length === 0 ||
+        sessRes.rows[0].account_status !== 'ACTIVE' ||
+        (sessRes.rows[0].machine_id && sessRes.rows[0].machine_status && sessRes.rows[0].machine_status !== 'REGISTERED')
+      ) {
+        ws.close(1008, 'UNAUTHORIZED: Invalid, expired, or revoked session');
         return;
       }
 
@@ -82,6 +88,8 @@ export function initWebSocketServer(httpServer) {
       ws.accountId = authenticatedAccountId;
       // @ts-ignore
       ws.sessionId = authenticatedSessionId;
+      // @ts-ignore
+      ws.machineId = sessRes.rows[0].machine_id || null;
 
       console.log(`✓ [WebSocket] Client connected: session ${authenticatedSessionId} (Account: ${authenticatedAccountId})`);
 
@@ -169,34 +177,45 @@ export function emitServerEvent(accountId, eventType, payload) {
 }
 
 /**
- * Broadcast an event envelope to connected WebSocket clients, isolated by targetAccountId if specified.
- * Adapts legacy calls into the structured Server-to-ACP event stream.
+ * Broadcast an event envelope to connected WebSocket clients, strictly isolated by targetAccountId.
+ * Fails closed (drops message) if targetAccountId is missing so operator events never leak across tenants.
  * @param {string} topic 
  * @param {any} payload 
  * @param {string | null} [targetAccountId=null]
  */
 export function broadcast(topic, payload, targetAccountId = null) {
-  if (targetAccountId) {
-    return emitServerEvent(targetAccountId, topic, payload);
+  const resolvedAccountId = targetAccountId || payload?.accountId || null;
+  if (!resolvedAccountId) {
+    return;
   }
+  return emitServerEvent(resolvedAccountId, topic, payload);
+}
 
-  if (!wssInstance) return;
-
-  const globalEnvelope = {
-    eventId: `evt_${crypto.randomUUID()}`,
-    eventType: topic,
-    topic,
-    server_epoch: getSystemEpoch(),
-    timestamp: new Date().toISOString(),
-    payload
-  };
-
-  const rawMessage = JSON.stringify(globalEnvelope);
+/**
+ * Immediately close active WebSocket connections matching a revoked account, session, or machine.
+ * @param {{ accountId?: string | null, sessionId?: string | null, machineId?: string | null }} target
+ * @returns {number} Number of closed sockets
+ */
+export function closeWebSocketsForTarget({ accountId = null, sessionId = null, machineId = null } = {}) {
+  if (!wssInstance) return 0;
+  let closed = 0;
   for (const client of wssInstance.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(rawMessage);
+    // @ts-ignore
+    const matchAccount = Boolean(accountId && client.accountId === accountId);
+    // @ts-ignore
+    const matchSession = Boolean(sessionId && client.sessionId === sessionId);
+    // @ts-ignore
+    const matchMachine = Boolean(machineId && client.machineId === machineId);
+    if (matchAccount || matchSession || matchMachine) {
+      try {
+        client.close(4003, 'Session or authority revoked');
+        closed++;
+      } catch {
+        // ignore close errors
+      }
     }
   }
+  return closed;
 }
 
 /**

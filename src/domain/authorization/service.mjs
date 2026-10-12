@@ -23,7 +23,7 @@ export async function resolve(sessionId, machineId, presentedGenerationState) {
   return withTransaction('SERIALIZABLE', async (client) => {
     // 1. Lock session with FOR UPDATE to prevent concurrent revocation race (BACKEND-CONC-001)
     const sessionRes = await client.query(
-      'SELECT account_id, status FROM sessions WHERE session_id = $1 AND machine_id = $2 FOR UPDATE',
+      'SELECT account_id, status, expires_at FROM sessions WHERE session_id = $1 AND machine_id = $2 FOR UPDATE',
       [sessionId, machineId]
     );
     if (sessionRes.rows.length === 0) {
@@ -33,8 +33,8 @@ export async function resolve(sessionId, machineId, presentedGenerationState) {
       throw err;
     }
     const session = sessionRes.rows[0];
-    if (session.status !== 'AUTHENTICATED') {
-      const err = new Error('Session not authenticated or revoked');
+    if (session.status !== 'AUTHENTICATED' || (session.expires_at && new Date(session.expires_at) <= new Date())) {
+      const err = new Error('Session not authenticated, expired, or revoked');
       // @ts-ignore
       err.status = 403;
       // @ts-ignore
@@ -42,12 +42,22 @@ export async function resolve(sessionId, machineId, presentedGenerationState) {
       throw err;
     }
 
-    // 2. Lock machine and verify not revoked
+    const acctRes = await client.query('SELECT status FROM accounts WHERE account_id = $1 FOR UPDATE', [session.account_id]);
+    if (acctRes.rows.length === 0 || acctRes.rows[0].status !== 'ACTIVE') {
+      const err = new Error('Account not active');
+      // @ts-ignore
+      err.status = 403;
+      // @ts-ignore
+      err.code = 'ACCOUNT_LOCKED';
+      throw err;
+    }
+
+    // 2. Lock machine and verify REGISTERED
     const machineRes = await client.query(
       'SELECT status FROM machines WHERE machine_id = $1 FOR UPDATE',
       [machineId]
     );
-    if (machineRes.rows.length === 0 || machineRes.rows[0].status === 'REVOKED') {
+    if (machineRes.rows.length === 0 || machineRes.rows[0].status !== 'REGISTERED') {
       const err = new Error('Machine not found or revoked');
       // @ts-ignore
       err.status = 403;
@@ -56,10 +66,10 @@ export async function resolve(sessionId, machineId, presentedGenerationState) {
       throw err;
     }
     
-    // 3. Lock license to avoid stale read
+    // 3. Lock license to avoid stale read and verify not expired
     const licenseRes = await client.query(`
       SELECT * FROM licenses 
-      WHERE account_id = $1 AND status = 'VALID' 
+      WHERE account_id = $1 AND status = 'VALID' AND (expires_at IS NULL OR expires_at > now())
       ORDER BY issued_at DESC LIMIT 1
       FOR UPDATE
     `, [session.account_id]);
@@ -80,10 +90,20 @@ export async function resolve(sessionId, machineId, presentedGenerationState) {
       FOR UPDATE
     `, [machineId, session.account_id]);
 
-    if (stateRes.rows.length > 0 && presentedGenerationState) {
+    if (stateRes.rows.length > 0) {
+      if (presentedGenerationState === undefined || presentedGenerationState === null) {
+        const err = new Error('GENERATION_MISMATCH');
+        // @ts-ignore
+        err.status = 403;
+        // @ts-ignore
+        err.code = 'GENERATION_MISMATCH';
+        throw err;
+      }
       const current = stateRes.rows[0];
-      let clientGen = typeof presentedGenerationState === 'number' ? presentedGenerationState : presentedGenerationState.session;
-      if (clientGen !== undefined && Number(clientGen) !== Number(current.session_generation)) {
+      let clientGen = typeof presentedGenerationState === 'number'
+        ? presentedGenerationState
+        : (presentedGenerationState.session ?? presentedGenerationState.generation);
+      if (clientGen === undefined || Number(clientGen) !== Number(current.session_generation)) {
         const err = new Error('GENERATION_MISMATCH');
         // @ts-ignore
         err.status = 403;

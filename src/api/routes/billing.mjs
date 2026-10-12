@@ -116,9 +116,12 @@ async function handleVerify(req, res, next) {
       });
     }
 
-    // Determine verification success
-    const isSuccess = tx && (tx.status === 'success' || tx.status === true) &&
-      (!tx.data || tx.data.status === 'successful' || !tx.data.status);
+    // Determine verification success (supporting both Flutterwave 'successful' and Paystack 'success')
+    const isSuccess = Boolean(
+      tx &&
+      (tx.status === 'success' || tx.status === true) &&
+      (!tx.data || tx.data.status === 'successful' || tx.data.status === 'success' || !tx.data.status)
+    );
 
     if (!isSuccess) {
       const snapshot = await getBillingSnapshot(accountId);
@@ -140,21 +143,36 @@ async function handleVerify(req, res, next) {
 
       const planId = (txMeta.plan_id || req.body.planId || 'pro').toLowerCase();
       const billingInterval = (txMeta.billing_interval || req.body.billingInterval || 'monthly').toLowerCase();
-      const amount = Number(tx.data?.charged_amount || tx.data?.amount || 10000);
+
+      // Normalize Paystack minor units (Kobo) vs Flutterwave major units
+      const isPaystack = Boolean(
+        tx.data?.authorization ||
+        tx.data?.domain ||
+        (!tx.data?.flw_ref && !tx.data?.charged_amount && tx.data?.status === 'success')
+      );
+      const rawAmount = Number(tx.data?.charged_amount ?? tx.data?.amount ?? 10000);
+      const amount = (isPaystack && rawAmount >= 100000) ? (rawAmount / 100) : rawAmount;
       const receiptUrl = tx.data?.receipt_url || null;
+      const providerRef = String(tx.data?.tx_ref || tx.data?.reference || reference).trim();
+      const providerTxId = String(tx.data?.id || reference).trim();
 
       const pool = getPool();
-      const planRes = await pool.query('SELECT * FROM subscription_plans WHERE LOWER(plan_id) = $1', [planId]);
+      const planRes = await pool.query('SELECT * FROM subscription_plans WHERE LOWER(plan_id) = $1 AND is_active = true', [planId]);
       const plan = planRes.rows[0];
 
-      if (plan) {
-        const expectedPrice = billingInterval === 'annual' ? Number(plan.annual_price) : Number(plan.monthly_price);
-        if (amount < expectedPrice) {
-          return res.status(400).json({
-            verified: false,
-            error: `Payment amount (${amount}) is insufficient for requested plan (${planId}: ${expectedPrice})`
-          });
-        }
+      if (!plan) {
+        return res.status(400).json({
+          verified: false,
+          error: `Unknown or inactive subscription plan: ${planId}`
+        });
+      }
+
+      const expectedPrice = billingInterval === 'annual' ? Number(plan.annual_price) : Number(plan.monthly_price);
+      if (amount < expectedPrice) {
+        return res.status(400).json({
+          verified: false,
+          error: `Payment amount (${amount}) is insufficient for requested plan (${planId}: ${expectedPrice})`
+        });
       }
 
       const client = await pool.connect();
@@ -165,12 +183,20 @@ async function handleVerify(req, res, next) {
           planId,
           billingInterval,
           amount,
-          reference: String(reference),
+          reference: providerRef,
+          providerTxId,
           receiptUrl
         });
         await client.query('COMMIT');
       } catch (dbErr) {
         await client.query('ROLLBACK');
+        if (dbErr && dbErr.code === 'PAYMENT_ALREADY_REDEEMED') {
+          return res.status(409).json({
+            verified: false,
+            code: 'PAYMENT_ALREADY_REDEEMED',
+            error: dbErr.message
+          });
+        }
         throw dbErr;
       } finally {
         client.release();

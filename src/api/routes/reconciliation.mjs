@@ -10,10 +10,12 @@ router.use(envelopeValidator);
 
 router.post('/sync', async (req, res, next) => {
   try {
-    const { envelope } = req;
+    // @ts-ignore
+    const { envelope, machineId } = req;
+    const verifiedMachineId = machineId || envelope.machineId;
     
     const result = await reconcile(
-      envelope.machineId,
+      verifiedMachineId,
       envelope.clientGeneration,
       envelope.clientServerEpoch,
       envelope.payload

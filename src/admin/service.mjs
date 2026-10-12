@@ -63,6 +63,11 @@ export function generateTotp(secret) {
   return generateHotp(key, currentStep);
 }
 
+/** @type {Map<string, string>} */
+const lastUsedTotpTokenByAdmin = new Map();
+
+const DUMMY_ARGON2_HASH = '$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHR2YWx1ZQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG';
+
 /**
  * RFC 6238 TOTP verification
  * @param {string} secret 
@@ -108,6 +113,7 @@ export async function adminLogin(email, password, totpCode) {
   );
 
   if (userRes.rows.length === 0) {
+    await verifyPassword(password || '', DUMMY_ARGON2_HASH).catch(() => false);
     const err = new Error('INVALID_ADMIN_CREDENTIALS');
     // @ts-ignore
     err.status = 401;
@@ -124,6 +130,15 @@ export async function adminLogin(email, password, totpCode) {
 
   const passwordValid = await verifyPassword(password, user.credentials_hash);
   if (!passwordValid) {
+    await logEvent(pool, {
+      eventType: 'ADMIN_ACTION',
+      severity: 'HIGH',
+      actorType: 'ADMIN',
+      actorId: user.admin_id,
+      result: 'FAILURE',
+      reason: 'admin_login_invalid_password',
+      metadata: { email: user.email }
+    }).catch(() => {});
     const err = new Error('INVALID_ADMIN_CREDENTIALS');
     // @ts-ignore
     err.status = 401;
@@ -131,12 +146,24 @@ export async function adminLogin(email, password, totpCode) {
   }
 
   const totpValid = verifyTotp(user.mfa_secret, totpCode);
-  if (!totpValid) {
-    const err = new Error('INVALID_MFA_CODE');
+  const currentBucket = `${Math.floor(Date.now() / 30000)}:${String(totpCode).trim()}`;
+  const isReplay = lastUsedTotpTokenByAdmin.get(user.admin_id) === currentBucket;
+  if (!totpValid || isReplay) {
+    await logEvent(pool, {
+      eventType: 'ADMIN_ACTION',
+      severity: 'HIGH',
+      actorType: 'ADMIN',
+      actorId: user.admin_id,
+      result: 'FAILURE',
+      reason: isReplay ? 'admin_login_totp_replayed' : 'admin_login_invalid_mfa',
+      metadata: { email: user.email }
+    }).catch(() => {});
+    const err = new Error(isReplay ? 'MFA_CODE_REPLAYED' : 'INVALID_MFA_CODE');
     // @ts-ignore
     err.status = 401;
     throw err;
   }
+  lastUsedTotpTokenByAdmin.set(user.admin_id, currentBucket);
 
   // Create 8-hour admin session
   const sessionRes = await pool.query(
