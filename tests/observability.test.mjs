@@ -8,8 +8,24 @@ import { getContext, runWithContext } from '../src/utils/context.mjs';
 test('Observability Test Suite', async (t) => {
   let server;
   let baseUrl;
+  let adminSessionId;
 
   t.before(async () => {
+    const { getPool } = await import('../src/persistence/connection.mjs');
+    const pool = getPool();
+    const adminUserRes = await pool.query(`
+      INSERT INTO admin_users (email, credentials_hash, role, mfa_secret, status)
+      VALUES ($1, 'dummy_hash', 'SUPPORT', 'JBSWY3DPEHPK3PXP', 'ACTIVE')
+      ON CONFLICT (email) DO UPDATE SET role = 'SUPPORT', status = 'ACTIVE'
+      RETURNING admin_id
+    `, [`obs_admin_${Date.now()}@bettingautomation.com`]);
+    const adminSessRes = await pool.query(`
+      INSERT INTO admin_sessions (admin_id, expires_at)
+      VALUES ($1, now() + interval '8 hours')
+      RETURNING session_id
+    `, [adminUserRes.rows[0].admin_id]);
+    adminSessionId = adminSessRes.rows[0].session_id;
+
     await new Promise((resolve) => {
       server = app.listen(0, () => {
         const port = server.address().port;
@@ -63,7 +79,11 @@ test('Observability Test Suite', async (t) => {
   });
 
   await t.test('5. GET /metrics returns aggregated JSON snapshot', async () => {
-    const res = await fetch(`${baseUrl}/metrics`);
+    const res = await fetch(`${baseUrl}/metrics`, {
+      headers: {
+        'Authorization': `Bearer ${adminSessionId}`
+      }
+    });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.ok(body.timestamp);
@@ -74,7 +94,8 @@ test('Observability Test Suite', async (t) => {
   await t.test('6. GET /metrics with text/plain accept header returns Prometheus format', async () => {
     const res = await fetch(`${baseUrl}/metrics`, {
       headers: {
-        'Accept': 'text/plain'
+        'Accept': 'text/plain',
+        'Authorization': `Bearer ${adminSessionId}`
       }
     });
     assert.equal(res.status, 200);

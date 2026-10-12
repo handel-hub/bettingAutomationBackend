@@ -79,10 +79,11 @@ test('End-to-End Integration Flow: Auth -> Machine Registration -> Full Auth -> 
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Authorization': `Bearer ${fullAuthEnvelope.payload.sessionId}`,
       'Idempotency-Key': `chk-integ-${Date.now()}`
     },
     body: JSON.stringify({
-      accountId: '9d627694-537d-4221-bafa-cf1f163c6bdc',
+      accountId: fullAuthEnvelope.payload.accountId,
       planId: 'PRO',
       returnUrl: `http://localhost:${PORT}/callback`
     })

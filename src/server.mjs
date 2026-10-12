@@ -156,12 +156,19 @@ app.get('/health/ready', async (req, res) => {
   }
 });
 
-app.get('/metrics', (req, res) => {
-  if (req.headers['accept']?.includes('text/plain')) {
-    res.setHeader('Content-Type', 'text/plain; version=0.0.4');
-    return res.send(metrics.getPrometheusFormat());
+app.get('/metrics', async (req, res, next) => {
+  try {
+    const { requireAdmin } = await import('./admin/routes.mjs');
+    return requireAdmin('SUPPORT')(req, res, () => {
+      if (req.headers['accept']?.includes('text/plain')) {
+        res.setHeader('Content-Type', 'text/plain; version=0.0.4');
+        return res.send(metrics.getPrometheusFormat());
+      }
+      res.json(metrics.getSnapshot());
+    });
+  } catch (err) {
+    next(err);
   }
-  res.json(metrics.getSnapshot());
 });
 
 app.use(errorHandler);

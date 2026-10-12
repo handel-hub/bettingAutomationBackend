@@ -12,7 +12,9 @@ const BASE_URL = `http://localhost:${PORT}/api/v1`;
 let testAccountId;
 let testMachineId;
 let testSessionId;
+let testAdminSessionId;
 let authHeaders = {};
+let adminAuthHeaders = {};
 
 before(async () => {
   if (!httpServer.listening) {
@@ -41,8 +43,25 @@ before(async () => {
   `, [testAccountId, testMachineId]);
   testSessionId = sessRes.rows[0].session_id;
 
+  const adminUserRes = await pool.query(`
+    INSERT INTO admin_users (email, credentials_hash, role, mfa_secret, status)
+    VALUES ($1, 'dummy_hash', 'SUPER_ADMIN', 'JBSWY3DPEHPK3PXP', 'ACTIVE')
+    ON CONFLICT (email) DO UPDATE SET role = 'SUPER_ADMIN', status = 'ACTIVE'
+    RETURNING admin_id
+  `, [`contract_admin_${Date.now()}@bettingautomation.com`]);
+  const adminSessRes = await pool.query(`
+    INSERT INTO admin_sessions (admin_id, expires_at)
+    VALUES ($1, now() + interval '8 hours')
+    RETURNING session_id
+  `, [adminUserRes.rows[0].admin_id]);
+  testAdminSessionId = adminSessRes.rows[0].session_id;
+
   authHeaders = {
     'Authorization': `Bearer ${testSessionId}`,
+    'Content-Type': 'application/json'
+  };
+  adminAuthHeaders = {
+    'Authorization': `Bearer ${testAdminSessionId}`,
     'Content-Type': 'application/json'
   };
 });
@@ -117,11 +136,11 @@ test('Target Architecture & Contract Specification Conformance Suite', async (t)
     assert.ok(Array.isArray(platformsData.platforms), 'Must return platforms list');
     assert.ok(platformsData.totalCount >= 7, 'Must have at least initial seeded bookmakers');
 
-    // Dynamically register a new platform (e.g. Dafabet or Betland)
+    // Dynamically register a new platform (Admin only)
     const newPlatformKey = `newbookie_${Date.now()}`;
     const regRes = await fetch(`${BASE_URL}/platforms`, {
       method: 'POST',
-      headers: authHeaders,
+      headers: adminAuthHeaders,
       body: JSON.stringify({
         platformKey: newPlatformKey,
         displayName: 'Betland International',
@@ -162,7 +181,7 @@ test('Target Architecture & Contract Specification Conformance Suite', async (t)
     const testChannelId = `chan_${Date.now()}`;
     const addRes = await fetch(`${BASE_URL}/support/channels`, {
       method: 'POST',
-      headers: authHeaders,
+      headers: adminAuthHeaders,
       body: JSON.stringify({
         id: testChannelId,
         title: 'VIP Dedicated WhatsApp Line',
