@@ -1,5 +1,6 @@
 // @ts-check
 import { getPool } from '../../persistence/connection.mjs';
+import { assertActiveLicense } from '../licensing/service.mjs';
 import crypto from 'crypto';
 
 /**
@@ -106,6 +107,8 @@ export async function updateGlobalConfig(accountId, category, values) {
   if (!col) throw new Error(`Invalid configuration category: ${category}`);
 
   const pool = getPool();
+  await assertActiveLicense(pool, accountId);
+
   const tenantId = String(accountId);
 
   // Seed tenant-isolated row from 'primary' template if it does not yet exist
@@ -156,6 +159,9 @@ export async function updateGlobalConfig(accountId, category, values) {
  */
 export async function toggleBetCycle(accountId, bettingAccountId, enabled) {
   const pool = getPool();
+  if (enabled) {
+    await assertActiveLicense(pool, accountId);
+  }
   await pool.query(`
     UPDATE automation_account_configs
     SET bet_cycle_enabled = $1, updated_at = now()
@@ -190,6 +196,8 @@ export async function updateAccountAutomationConfig(accountId, bettingAccountId,
   const colCustom = `custom_${category}`;
 
   const pool = getPool();
+  await assertActiveLicense(pool, accountId);
+
   const res = await pool.query(`
     UPDATE automation_account_configs
     SET ${colSource} = $1, ${colCustom} = $2, updated_at = now()

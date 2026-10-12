@@ -12,6 +12,7 @@ import {
   updateAccountFields,
   getCredentialsForDecryption
 } from './repository.mjs';
+import { assertActiveLicense } from '../licensing/service.mjs';
 
 /**
  * Master key for AEAD AES-256-GCM encryption of stored betting passwords.
@@ -338,6 +339,7 @@ export async function executeAccountAction(accountId, id, actionType) {
     category = 'Neutral';
     description = 'Account archived';
   } else if (actionType === 'ACTIVATE_ACCOUNT' || actionType === 'ACTIVATE') {
+    await assertActiveLicense(undefined, accountId);
     newState = 'ACTIVE';
     category = 'Healthy';
     description = 'Operating normally';
@@ -414,6 +416,8 @@ export async function getDecryptedPassword(accountId, id) {
 }
 
 export async function updateBettingAccount(accountId, id, updates) {
+  await assertActiveLicense(undefined, accountId);
+
   let ciphertext, nonce, tag;
   if (updates.accountPassword) {
     const existing = await findAccountById(undefined, accountId, id);

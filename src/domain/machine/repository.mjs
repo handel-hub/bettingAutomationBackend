@@ -235,7 +235,7 @@ export async function listMachinesByAccount(client, accountId) {
 }
 
 /**
- * Revoke a machine and its active sessions
+ * Revoke a machine and its active sessions, authorizations, generation state, and WebSocket connections
  * @param {import('pg').PoolClient | import('pg').Pool} [client]
  * @param {string} machineId
  * @param {string | null} [accountId]
@@ -252,10 +252,48 @@ export async function revokeMachine(client, machineId, accountId = null) {
   if (updRes.rows.length === 0) {
     return;
   }
+  const resolvedAccountId = updRes.rows[0].account_id || accountId || null;
+
+  await runner.query(`
+    UPDATE authorizations
+    SET status = 'REVOKED', updated_at = now()
+    WHERE session_id IN (SELECT session_id FROM sessions WHERE machine_id = $1)
+      AND status = 'VALID'
+  `, [machineId]);
+
   await runner.query(`
     UPDATE sessions
     SET status = 'REVOKED'
     WHERE machine_id = $1 AND status = 'AUTHENTICATED'
   `, [machineId]);
+
+  await runner.query(`
+    UPDATE machine_session_states
+    SET session_generation = session_generation + 1,
+        machine_generation = machine_generation + 1,
+        updated_at = now()
+    WHERE machine_id = $1
+  `, [machineId]);
+
+  await runner.query(`
+    INSERT INTO outbox_events (event_type, payload, idempotency_key)
+    VALUES ('REVOCATION_NOTICE', $1, $2)
+    ON CONFLICT (idempotency_key) DO NOTHING
+  `, [
+    JSON.stringify({
+      scope: 'MACHINE',
+      targetId: machineId,
+      accountId: resolvedAccountId,
+      reason: 'operator_machine_revoked'
+    }),
+    `rev-machine-${machineId}-${Date.now()}`
+  ]);
+
+  try {
+    const { closeWebSocketsForTarget } = await import('../../websocket/server.mjs');
+    closeWebSocketsForTarget({ machineId });
+  } catch {
+    // Non-fatal if WebSocket server not running
+  }
 }
 

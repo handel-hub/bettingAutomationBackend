@@ -41,9 +41,20 @@ before(async () => {
   // Clean up any test artifacts
   await pool.query("DELETE FROM machines WHERE descriptor->>'hostname' = 'remediation-test'");
 
-  // Ensure an active account exists
-  const accRes = await pool.query('SELECT account_id FROM accounts LIMIT 1');
+  // Ensure an active account with a valid license exists for scenario testing
+  const accRes = await pool.query(`
+    SELECT a.account_id
+    FROM accounts a
+    LEFT JOIN licenses l ON l.account_id = a.account_id AND l.status = 'VALID'
+    WHERE a.status = 'ACTIVE'
+    ORDER BY (l.license_id IS NOT NULL) DESC
+    LIMIT 1
+  `);
   testAccountId = accRes.rows[0].account_id;
+  await pool.query(`
+    UPDATE licenses SET status = 'VALID', expires_at = now() + interval '30 days'
+    WHERE account_id = $1
+  `, [testAccountId]);
 
   // Generate Ed25519 client keypair
   testClientKeyPair = crypto.generateKeyPairSync('ed25519');

@@ -135,13 +135,33 @@ export async function processOutboxEvent(event) {
             const providerTxId = String(payload.data?.id || ref).trim();
             const billingInterval = (payload.data?.meta?.billing_interval || payload.data?.metadata?.billing_interval || 'monthly').toLowerCase();
             
-            let majorAmount;
-            if (isFlw) {
-              majorAmount = Number(payload.data?.charged_amount || payload.data?.amount || 10000);
-            } else {
-              const rawAmount = payload.data?.amount || 1000000;
-              majorAmount = (typeof rawAmount === 'number' && rawAmount >= 100) ? (rawAmount / 100) : rawAmount;
+            const currency = String(payload.data?.currency || 'NGN').trim().toUpperCase();
+            if (currency !== 'NGN') {
+              outboxLogger.warn({
+                event: 'payment_webhook_currency_mismatch',
+                accountId: accId,
+                currency,
+                reference: ref
+              }, `Rejected webhook payment with unsupported currency (${currency})`);
+              return true;
             }
+
+            const rawAmountVal = isFlw
+              ? (payload.data?.charged_amount ?? payload.data?.amount)
+              : payload.data?.amount;
+
+            if (rawAmountVal === undefined || rawAmountVal === null || Number.isNaN(Number(rawAmountVal)) || Number(rawAmountVal) <= 0) {
+              outboxLogger.warn({
+                event: 'payment_webhook_missing_amount',
+                accountId: accId,
+                reference: ref
+              }, 'Rejected webhook payment with missing or non-positive amount');
+              return true;
+            }
+
+            const majorAmount = isFlw
+              ? Number(rawAmountVal)
+              : (Number(rawAmountVal) / 100);
 
             const planRes = await client.query('SELECT * FROM subscription_plans WHERE LOWER(plan_id) = LOWER($1)', [planId]);
             const plan = planRes.rows[0];

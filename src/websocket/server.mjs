@@ -193,13 +193,17 @@ export function broadcast(topic, payload, targetAccountId = null) {
 
 /**
  * Immediately close active WebSocket connections matching a revoked account, session, or machine.
- * @param {{ accountId?: string | null, sessionId?: string | null, machineId?: string | null }} target
+ * @param {{ accountId?: string | null, sessionId?: string | null, machineId?: string | null, excludeSessionId?: string | null }} target
  * @returns {number} Number of closed sockets
  */
-export function closeWebSocketsForTarget({ accountId = null, sessionId = null, machineId = null } = {}) {
+export function closeWebSocketsForTarget({ accountId = null, sessionId = null, machineId = null, excludeSessionId = null } = {}) {
   if (!wssInstance) return 0;
   let closed = 0;
   for (const client of wssInstance.clients) {
+    // @ts-ignore
+    if (excludeSessionId && client.sessionId === excludeSessionId) {
+      continue;
+    }
     // @ts-ignore
     const matchAccount = Boolean(accountId && client.accountId === accountId);
     // @ts-ignore

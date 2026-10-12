@@ -11,6 +11,8 @@ import { getSubscriptionPlansCatalog } from '../../domain/plans/service.mjs';
 import { initiateCheckout } from '../../domain/payment/service.mjs';
 import { getProvider } from '../../domain/payment/provider.mjs';
 import { getPool } from '../../persistence/connection.mjs';
+import { signLicensePayload } from '../../domain/licensing/service.mjs';
+import { buildEnvelope } from '../../protocol/envelope.mjs';
 
 const router = Router();
 
@@ -154,14 +156,34 @@ async function handleVerify(req, res, next) {
       const planId = (txMeta.plan_id || req.body.planId || 'pro').toLowerCase();
       const billingInterval = (txMeta.billing_interval || req.body.billingInterval || 'monthly').toLowerCase();
 
-      // Normalize Paystack minor units (Kobo) vs Flutterwave major units
+      // Verify transaction currency is NGN
+      const currency = String(tx.data?.currency || 'NGN').trim().toUpperCase();
+      if (currency !== 'NGN') {
+        return res.status(400).json({
+          verified: false,
+          code: 'CURRENCY_MISMATCH',
+          error: `Unsupported transaction currency: expected NGN, received ${currency}`
+        });
+      }
+
+      // Reject missing payment amounts (zero-trust: never default to 10000)
+      const rawAmountVal = tx.data?.charged_amount ?? tx.data?.amount;
+      if (rawAmountVal === undefined || rawAmountVal === null || Number.isNaN(Number(rawAmountVal)) || Number(rawAmountVal) <= 0) {
+        return res.status(400).json({
+          verified: false,
+          code: 'MISSING_PAYMENT_AMOUNT',
+          error: 'Verified transaction is missing a valid positive payment amount'
+        });
+      }
+
+      // Normalize Paystack minor units (Kobo: 100 Kobo = 1 NGN) vs Flutterwave major units
       const isPaystack = Boolean(
         tx.data?.authorization ||
         tx.data?.domain ||
         (!tx.data?.flw_ref && !tx.data?.charged_amount && tx.data?.status === 'success')
       );
-      const rawAmount = Number(tx.data?.charged_amount ?? tx.data?.amount ?? 10000);
-      const amount = (isPaystack && rawAmount >= 100000) ? (rawAmount / 100) : rawAmount;
+      const rawAmount = Number(rawAmountVal);
+      const amount = isPaystack ? (rawAmount / 100) : rawAmount;
       const receiptUrl = tx.data?.receipt_url || null;
       const providerRef = String(tx.data?.tx_ref || tx.data?.reference || reference).trim();
       const providerTxId = String(tx.data?.id || reference).trim();
@@ -181,6 +203,7 @@ async function handleVerify(req, res, next) {
       if (amount < expectedPrice) {
         return res.status(400).json({
           verified: false,
+          code: 'PAYMENT_AMOUNT_MISMATCH',
           error: `Payment amount (${amount}) is insufficient for requested plan (${planId}: ${expectedPrice})`
         });
       }
@@ -214,24 +237,47 @@ async function handleVerify(req, res, next) {
     }
 
     const snapshot = await getBillingSnapshot(accountId);
-    res.json({
+    const responseCapabilities = paymentResult?.capabilities || [
+      'CAP_EXECUTE',
+      'CAP_OFFLINE_GRACE',
+      'CAP_TELEMETRY_WRITE',
+      'CAP_CONFIG_MODIFY',
+      'CAP_AUTOMATION_START',
+      'CAP_AUTOMATION_STOP',
+      'CAP_ACCOUNT_MANAGE',
+      'CAP_FILE_UPLOAD',
+      'CAP_TACTICAL_BET',
+      'CAP_CASH_OUT'
+    ];
+    const rawLicense = paymentResult ? {
+      id: paymentResult.licenseId,
+      licenseId: paymentResult.licenseId,
+      status: paymentResult.licenseStatus || 'VALID',
+      planId: paymentResult.planId,
+      capabilities: paymentResult.capabilities,
+      limits: paymentResult.limits
+    } : {
+      id: snapshot?.subscription?.id || `lic-${accountId}`,
+      status: 'VALID',
+      planId: snapshot?.subscription?.planId || 'pro',
+      capabilities: responseCapabilities
+    };
+    const signedLicense = rawLicense.status === 'VALID'
+      ? await signLicensePayload(rawLicense)
+      : rawLicense;
+
+    const responsePayload = {
       verified: true,
       status: 'Authorized',
       snapshot,
-      license: paymentResult ? {
-        licenseId: paymentResult.licenseId,
-        status: paymentResult.licenseStatus || 'VALID',
-        planId: paymentResult.planId,
-        capabilities: paymentResult.capabilities,
-        limits: paymentResult.limits
-      } : { status: 'VALID' },
-      capabilities: paymentResult?.capabilities || [
-        'CAP_AUTOMATION_START',
-        'CAP_AUTOMATION_STOP',
-        'CAP_FILE_UPLOAD',
-        'CAP_TACTICAL_BET',
-        'CAP_CASH_OUT'
-      ]
+      license: signedLicense,
+      capabilities: responseCapabilities
+    };
+    const signedEnvelope = await buildEnvelope(responsePayload, 1);
+
+    res.json({
+      ...signedEnvelope,
+      ...responsePayload
     });
   } catch (err) {
     next(err);

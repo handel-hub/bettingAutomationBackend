@@ -18,6 +18,7 @@ import { createBettingAccount } from '../src/domain/betting-accounts/service.mjs
 import { broadcast } from '../src/websocket/server.mjs';
 import { createUpload } from '../src/adapters/storage/adapter.mjs';
 import { scheduleSubscriptions } from '../src/jobs/subscription-scheduler.mjs';
+import { initializePaymentAdapter } from '../src/adapters/payment/adapter.mjs';
 
 const PORT = 3099;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
@@ -606,6 +607,53 @@ test('System-Wide Security Redesign Invariant Suite (SEC-INV-01 through SEC-INV-
       body: JSON.stringify({ targetVersion: 'v0.2.0' })
     });
     assert.strictEqual(adminUpdateRes.status, 200, 'SUPER_ADMIN must be permitted to trigger restart-and-update');
+  });
+
+  await t.test('SEC-INV-07 (White-Box Hardening): Cryptographically signed license payloads, Envelope V2 billing verify, active license gating on mutations, and settings session revocation cascade', async () => {
+    const baseUrl = getServerBaseUrl();
+    const pool = getPool();
+
+    // 1. authenticate() returns a cryptographically signed license payload
+    const authRes = await authenticate('tester@bettingautomation.com', 'Password123!', sharedMachineId, 2, `nonce-wb-${crypto.randomUUID()}`);
+    assert.ok(authRes.license, 'authenticate() must return license object');
+    assert.strictEqual(typeof authRes.license.signature, 'string', 'license.signature must be a hex string');
+    assert.strictEqual(authRes.license.signature.length, 128, 'Ed25519 signature must be 128 hex chars');
+    assert.strictEqual(typeof authRes.license.key_version, 'number', 'license.key_version must be present');
+
+    // 2. POST /api/v1/billing/checkout/verify returns signed Envelope V2 with signed license
+    const verifyRef = `ref-wb-verify-${crypto.randomUUID()}`;
+    initializePaymentAdapter('stub', { NODE_ENV: 'test', ALLOW_TEST_PAYMENT_STUB: 'true' });
+    const verifyRes = await fetch(`${baseUrl}/api/v1/billing/checkout/verify`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authRes.sessionId}`
+      },
+      body: JSON.stringify({ reference: verifyRef, planId: 'pro' })
+    });
+    assert.strictEqual(verifyRes.status, 200, 'Billing checkout verify must succeed');
+    const verifyEnv = await verifyRes.json();
+    assert.strictEqual(verifyEnv.version, 2, 'Billing checkout verify response must be wrapped in Envelope V2');
+    assert.ok(verifyEnv.signatures && typeof verifyEnv.signatures === 'object', 'Billing checkout verify envelope must carry Ed25519 signatures');
+    assert.strictEqual(verifyEnv.payload?.verified, true, 'Envelope payload must confirm verification');
+    assert.strictEqual(typeof verifyEnv.payload?.license?.signature, 'string', 'Provisioned license inside billing verify must be signed');
+
+    // 3. Domain mutation (updateGlobalConfig) rejects with 403 BE_PERM_LICENSE_EXPIRED when license is expired
+    await pool.query("UPDATE licenses SET status = 'EXPIRED' WHERE account_id = $1", [TESTER_ACCOUNT_ID]);
+    try {
+      await assert.rejects(
+        async () => {
+          await updateGlobalConfig(TESTER_ACCOUNT_ID, 'pricing', { minOdds: 2.0 });
+        },
+        (err) => err.code === 'BE_PERM_LICENSE_EXPIRED' && err.status === 403
+      );
+    } finally {
+      await pool.query(
+        `UPDATE licenses SET status = 'VALID', expires_at = now() + interval '30 days'
+         WHERE license_id = (SELECT license_id FROM licenses WHERE account_id = $1 ORDER BY issued_at DESC LIMIT 1)`,
+        [TESTER_ACCOUNT_ID]
+      );
+    }
   });
 });
 

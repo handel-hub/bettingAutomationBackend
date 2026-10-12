@@ -81,11 +81,13 @@ export async function getSettingsSnapshot(accountId) {
  * @param {string} intent.type 
  * @param {Record<string, any>} intent.payload 
  * @param {string} [intent.stepUpSecret]
+ * @param {{ currentSessionId?: string | null }} [context]
  * @returns {Promise<Object>}
  */
-export async function processSettingsIntent(accountId, intent) {
+export async function processSettingsIntent(accountId, intent, context = {}) {
   const pool = getPool();
   const { type, payload = {}, stepUpSecret } = intent;
+  const currentSessionId = context?.currentSessionId || intent?.currentSessionId || null;
   const requestId = `req-${crypto.randomUUID()}`;
 
   switch (type) {
@@ -109,8 +111,18 @@ export async function processSettingsIntent(accountId, intent) {
     }
 
     case 'CHANGE_EMAIL': {
-      const { email } = payload;
-      if (!email) throw new Error('Email is required');
+      const rawEmail = payload?.email;
+      if (!rawEmail || typeof rawEmail !== 'string') throw new Error('Email is required');
+      const normalizedEmail = rawEmail.trim().toLowerCase();
+      const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!EMAIL_REGEX.test(normalizedEmail)) {
+        return {
+          requestId,
+          status: 'REJECTED',
+          section: 'PROFILE',
+          message: 'Invalid email address format'
+        };
+      }
 
       const secret = stepUpSecret || payload.currentPassword;
       if (!secret) {
@@ -130,18 +142,31 @@ export async function processSettingsIntent(accountId, intent) {
         return { requestId, status: 'CHALLENGE_FAILED', section: 'SECURITY', message: 'Current password is incorrect' };
       }
 
+      const dupRes = await pool.query(
+        'SELECT 1 FROM accounts WHERE LOWER(email) = $1 AND account_id != $2 LIMIT 1',
+        [normalizedEmail, accountId]
+      );
+      if (dupRes.rows.length > 0) {
+        return {
+          requestId,
+          status: 'REJECTED',
+          section: 'PROFILE',
+          message: 'Email address is already in use by another account'
+        };
+      }
+
       await pool.query(`
         UPDATE operator_settings
         SET pending_email = $1, updated_at = now()
         WHERE account_id = $2
-      `, [email, accountId]);
+      `, [normalizedEmail, accountId]);
 
       return {
         requestId,
         status: 'ACCEPTED',
         section: 'PROFILE',
-        message: `Verification link sent to ${email}`,
-        data: { pendingEmail: email }
+        message: `Verification link sent to ${normalizedEmail}`,
+        data: { pendingEmail: normalizedEmail }
       };
     }
 
@@ -186,6 +211,40 @@ export async function processSettingsIntent(accountId, intent) {
 
       const newHash = await hashPassword(String(newPassword));
       await pool.query('UPDATE accounts SET credentials_hash = $1, updated_at = now() WHERE account_id = $2', [newHash, accountId]);
+
+      // Revoke all OTHER active sessions for this account and bump their machine session_generation
+      const revokedOtherRes = await pool.query(`
+        UPDATE sessions
+        SET status = 'REVOKED'
+        WHERE account_id = $1
+          AND status = 'AUTHENTICATED'
+          AND ($2::uuid IS NULL OR session_id != $2)
+        RETURNING session_id, machine_id
+      `, [accountId, currentSessionId]);
+
+      if (revokedOtherRes.rows.length > 0) {
+        const revokedSessionIds = revokedOtherRes.rows.map((r) => r.session_id);
+        const affectedMachineIds = Array.from(new Set(revokedOtherRes.rows.map((r) => r.machine_id).filter(Boolean)));
+        await pool.query(`
+          UPDATE authorizations
+          SET status = 'REVOKED', updated_at = now()
+          WHERE session_id = ANY($1::uuid[]) AND status = 'VALID'
+        `, [revokedSessionIds]);
+        if (affectedMachineIds.length > 0) {
+          await pool.query(`
+            UPDATE machine_session_states
+            SET session_generation = session_generation + 1, updated_at = now()
+            WHERE account_id = $1 AND machine_id = ANY($2::uuid[])
+          `, [accountId, affectedMachineIds]);
+        }
+      }
+
+      try {
+        const { closeWebSocketsForTarget } = await import('../../websocket/server.mjs');
+        closeWebSocketsForTarget({ accountId, excludeSessionId: currentSessionId });
+      } catch {
+        // ignore
+      }
 
       return {
         requestId,
@@ -233,25 +292,46 @@ export async function processSettingsIntent(accountId, intent) {
     }
 
     case 'REVOKE_SESSIONS': {
-      await pool.query(`
+      const revokedSessionsRes = await pool.query(`
         UPDATE sessions
         SET status = 'REVOKED'
-        WHERE account_id = $1 AND status = 'AUTHENTICATED'
-      `, [accountId]);
-      await pool.query(`
-        UPDATE authorizations
-        SET status = 'REVOKED', updated_at = now()
-        WHERE account_id = $1 AND status = 'VALID'
-      `, [accountId]);
-      await pool.query(`
-        UPDATE machine_session_states
-        SET session_generation = session_generation + 1, updated_at = now()
         WHERE account_id = $1
-      `, [accountId]);
+          AND status = 'AUTHENTICATED'
+          AND ($2::uuid IS NULL OR session_id != $2)
+        RETURNING session_id, machine_id
+      `, [accountId, currentSessionId]);
+
+      if (revokedSessionsRes.rows.length > 0) {
+        const revokedSessionIds = revokedSessionsRes.rows.map((r) => r.session_id);
+        const affectedMachineIds = Array.from(new Set(revokedSessionsRes.rows.map((r) => r.machine_id).filter(Boolean)));
+        await pool.query(`
+          UPDATE authorizations
+          SET status = 'REVOKED', updated_at = now()
+          WHERE session_id = ANY($1::uuid[]) AND status = 'VALID'
+        `, [revokedSessionIds]);
+        if (affectedMachineIds.length > 0) {
+          await pool.query(`
+            UPDATE machine_session_states
+            SET session_generation = session_generation + 1, updated_at = now()
+            WHERE account_id = $1 AND machine_id = ANY($2::uuid[])
+          `, [accountId, affectedMachineIds]);
+        }
+      } else if (!currentSessionId) {
+        await pool.query(`
+          UPDATE authorizations
+          SET status = 'REVOKED', updated_at = now()
+          WHERE account_id = $1 AND status = 'VALID'
+        `, [accountId]);
+        await pool.query(`
+          UPDATE machine_session_states
+          SET session_generation = session_generation + 1, updated_at = now()
+          WHERE account_id = $1
+        `, [accountId]);
+      }
 
       try {
         const { closeWebSocketsForTarget } = await import('../../websocket/server.mjs');
-        closeWebSocketsForTarget({ accountId });
+        closeWebSocketsForTarget({ accountId, excludeSessionId: currentSessionId });
       } catch {
         // ignore
       }

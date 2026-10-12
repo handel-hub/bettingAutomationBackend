@@ -34,32 +34,35 @@ router.post('/restart-and-update', async (req, res, next) => {
       }
     }
 
-    await new Promise((resolve, reject) => {
-      operatorAuth(req, res, (err) => (err ? reject(err) : resolve(null)));
-    });
-
-    // @ts-ignore
-    const accountId = req.accountId;
-    const pool = getPool();
-    const licRes = await pool.query(
-      `SELECT capabilities FROM licenses
-       WHERE account_id = $1 AND status = 'VALID' AND (expires_at IS NULL OR expires_at > now())
-       ORDER BY issued_at DESC LIMIT 1`,
-      [accountId]
-    );
-    const caps = Array.isArray(licRes.rows[0]?.capabilities) ? licRes.rows[0].capabilities : [];
-    if (!caps.includes('CAP_UPDATE_INSTALL') && !caps.includes('CAP_SYSTEM_UPDATE')) {
-      return res.status(403).json({
-        error: {
-          code: 'BE_PERM_ENTITLEMENT_EXCEEDED',
-          legacyCode: 'FORBIDDEN',
-          message: 'CAP_UPDATE_INSTALL capability or SUPER_ADMIN role required to trigger system restart and update'
+    return operatorAuth(req, res, async (err) => {
+      if (err) return next(err);
+      try {
+        // @ts-ignore
+        const accountId = req.accountId;
+        const pool = getPool();
+        const licRes = await pool.query(
+          `SELECT capabilities FROM licenses
+           WHERE account_id = $1 AND status = 'VALID' AND (expires_at IS NULL OR expires_at > now())
+           ORDER BY issued_at DESC LIMIT 1`,
+          [accountId]
+        );
+        const caps = Array.isArray(licRes.rows[0]?.capabilities) ? licRes.rows[0].capabilities : [];
+        if (!caps.includes('CAP_UPDATE_INSTALL') && !caps.includes('CAP_SYSTEM_UPDATE')) {
+          return res.status(403).json({
+            error: {
+              code: 'BE_PERM_ENTITLEMENT_EXCEEDED',
+              legacyCode: 'FORBIDDEN',
+              message: 'CAP_UPDATE_INSTALL capability or SUPER_ADMIN role required to trigger system restart and update'
+            }
+          });
         }
-      });
-    }
 
-    const result = await restartAndUpdate(accountId, req.body || {});
-    res.json(result);
+        const result = await restartAndUpdate(accountId, req.body || {});
+        return res.json(result);
+      } catch (innerErr) {
+        return next(innerErr);
+      }
+    });
   } catch (err) {
     next(err);
   }

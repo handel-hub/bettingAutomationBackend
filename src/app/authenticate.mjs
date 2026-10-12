@@ -3,7 +3,7 @@ import { withTransaction } from '../persistence/transaction.mjs';
 import { getAccountByEmailForUpdate, updateAccountLockout } from '../domain/auth/repository.mjs';
 import { verifyCredentials } from '../domain/auth/service.mjs';
 import { verifyPassword } from '../crypto/hashing.mjs';
-import { getActiveLicenseForAuth } from '../domain/licensing/service.mjs';
+import { getActiveLicenseForAuth, signLicensePayload } from '../domain/licensing/service.mjs';
 import { findLatestByAccount } from '../domain/licensing/repository.mjs';
 import { computeCapabilities } from '../domain/authorization/service.mjs';
 import { logEvent } from '../domain/audit/service.mjs';
@@ -233,6 +233,22 @@ export async function authenticate(email, password, machineId, protocolVersion, 
       const riskTier = license?.limits?.risk_tier || 'LOW_RISK';
       graceToken = await issueGraceToken(account.account_id, actualMachineId, capabilities, riskTier);
     }
+
+    const rawLicensePayload = license ? {
+      id: license.license_id,
+      planId: license.plan_id,
+      status: hasValidLicense ? 'VALID' : (license.status === 'REVOKED' ? 'REVOKED' : 'EXPIRED'),
+      expiresAt: license.expires_at ? new Date(license.expires_at).toISOString() : null,
+      capabilities,
+      entitlementVersion: license.license_revision || 1
+    } : {
+      status: 'PAYMENT_REQUIRED',
+      planId: 'none'
+    };
+
+    const signedLicense = hasValidLicense
+      ? await signLicensePayload(rawLicensePayload)
+      : rawLicensePayload;
     
     return {
       sessionId,
@@ -240,15 +256,7 @@ export async function authenticate(email, password, machineId, protocolVersion, 
       status: isPartial ? 'PARTIAL' : 'AUTHENTICATED',
       sessionGeneration,
       nonceValidated: true,
-      license: license ? {
-        id: license.license_id,
-        planId: license.plan_id,
-        status: hasValidLicense ? 'VALID' : (license.status === 'REVOKED' ? 'REVOKED' : 'EXPIRED'),
-        expiresAt: license.expires_at ? new Date(license.expires_at).toISOString() : null
-      } : {
-        status: 'PAYMENT_REQUIRED',
-        planId: 'none'
-      },
+      license: signedLicense,
       capabilities,
       graceToken
     };

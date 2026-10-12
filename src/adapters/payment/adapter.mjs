@@ -188,7 +188,7 @@ export function initializePaymentAdapter(providerOrSecretKey, options = {}) {
           id: transactionIdOrRef,
           tx_ref: String(transactionIdOrRef),
           status: 'successful',
-          amount: 10000,
+          amount: 100000,
           currency: 'NGN'
         }
       };
