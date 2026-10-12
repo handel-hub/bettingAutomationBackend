@@ -61,9 +61,10 @@ export function initializePaymentAdapter(providerOrSecretKey, options = {}) {
       const paystack = new Paystack(paystackSecret);
 
       const p = {
-        async createCheckoutSession(accountId, planId, returnUrl) {
+        async createCheckoutSession(accountId, planId, returnUrl, billingInterval = 'monthly') {
           let email = `${accountId}@bettingautomation.io`; 
           let amount = 1000000; // ₦10,000 in Kobo default
+          const interval = (billingInterval || 'monthly').toLowerCase();
           
           try {
             const { findById } = await import('../../domain/account/repository.mjs');
@@ -74,9 +75,15 @@ export function initializePaymentAdapter(providerOrSecretKey, options = {}) {
             
             const { getPool } = await import('../../persistence/connection.mjs');
             const pool = getPool();
-            const planRes = await pool.query('SELECT limits FROM plan_entitlements WHERE plan_id = $1', [planId]);
-            if (planRes.rows.length > 0 && planRes.rows[0].limits?.price) {
-              amount = Math.round(Number(planRes.rows[0].limits.price) * 100);
+            const spRes = await pool.query('SELECT monthly_price, annual_price FROM subscription_plans WHERE LOWER(plan_id) = LOWER($1)', [planId]);
+            if (spRes.rows.length > 0) {
+              const majorPrice = interval === 'annual' ? Number(spRes.rows[0].annual_price) : Number(spRes.rows[0].monthly_price);
+              amount = Math.round(majorPrice * 100);
+            } else {
+              const planRes = await pool.query('SELECT limits FROM plan_entitlements WHERE plan_id = $1', [planId]);
+              if (planRes.rows.length > 0 && planRes.rows[0].limits?.price) {
+                amount = Math.round(Number(planRes.rows[0].limits.price) * 100);
+              }
             }
           } catch {
             // Fallback
@@ -88,7 +95,8 @@ export function initializePaymentAdapter(providerOrSecretKey, options = {}) {
             callback_url: returnUrl,
             metadata: {
               account_id: accountId,
-              plan_id: planId
+              plan_id: planId,
+              billing_interval: interval
             }
           });
           

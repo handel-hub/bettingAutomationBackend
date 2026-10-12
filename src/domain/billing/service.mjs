@@ -130,10 +130,18 @@ export async function cancelSubscription(accountId) {
  */
 export async function resumeSubscription(accountId) {
   const row = await resumeSubscriptionInDb(undefined, accountId);
+  if (!row) {
+    const err = new Error('Cannot resume an expired or non-existent subscription without payment');
+    // @ts-ignore
+    err.status = 402;
+    // @ts-ignore
+    err.code = 'SUBSCRIPTION_PERIOD_EXPIRED';
+    throw err;
+  }
 
   return {
     status: 'Active',
-    renewalDate: row?.current_period_end || new Date(Date.now() + 30 * 86400000).toISOString()
+    renewalDate: row.current_period_end
   };
 }
 
@@ -170,6 +178,7 @@ export async function applyPaymentSuccess(client, {
   billingInterval = 'monthly',
   amount = 10000,
   reference,
+  providerTxId = null,
   receiptUrl = null,
   providerSubId = null
 }) {
@@ -179,19 +188,51 @@ export async function applyPaymentSuccess(client, {
   const normalizedPlanId = effectivePlanId.toLowerCase();
   const interval = (billingInterval || 'monthly').toLowerCase();
   const periodInterval = interval === 'annual' ? '365 days' : '30 days';
-  const ref = reference || `ref-${Date.now()}`;
+  const ref = String(reference || `ref-${Date.now()}`).trim();
+  const txIdStr = providerTxId ? String(providerTxId).trim() : ref;
+
+  // Canonical multi-alias replay & cross-account theft check (USF-02 / ADR-03)
+  const candidateRefs = Array.from(new Set([ref, txIdStr, `inv-${ref}`, `inv-${txIdStr}`]));
+  const existingInvRes = await runner.query(
+    `SELECT id, reference, account_id FROM invoices
+     WHERE reference = ANY($1::text[]) OR id = ANY($1::text[])
+     FOR UPDATE`,
+    [candidateRefs]
+  );
+  if (existingInvRes.rows.length > 0) {
+    const err = new Error('Payment transaction reference has already been redeemed');
+    // @ts-ignore
+    err.status = 409;
+    // @ts-ignore
+    err.code = 'PAYMENT_ALREADY_REDEEMED';
+    throw err;
+  }
+
+  // Validate planId against subscription_plans / plan_entitlements (USF-02)
+  const planCheckRes = await runner.query(
+    'SELECT plan_id FROM subscription_plans WHERE LOWER(plan_id) = $1',
+    [normalizedPlanId]
+  );
+  const entRes = await runner.query(
+    'SELECT plan_id, capabilities, limits FROM plan_entitlements WHERE LOWER(plan_id) = $1',
+    [normalizedPlanId]
+  );
+  if (planCheckRes.rows.length === 0 && entRes.rows.length === 0) {
+    const err = new Error(`Unknown subscription plan: ${effectivePlanId}`);
+    // @ts-ignore
+    err.status = 400;
+    // @ts-ignore
+    err.code = 'INVALID_PLAN';
+    throw err;
+  }
+  const canonicalPlanId = planCheckRes.rows[0]?.plan_id || entRes.rows[0]?.plan_id || effectivePlanId;
 
   // Fetch entitlements for capabilities & limits
   let capabilities = ['CAP_AUTOMATION_START', 'CAP_AUTOMATION_STOP', 'CAP_FILE_UPLOAD', 'CAP_TACTICAL_BET', 'CAP_CASH_OUT'];
   let limits = { max_machines: 5, max_concurrent_browsers: 5, risk_tier: 'LOW' };
-  try {
-    const entRes = await runner.query('SELECT capabilities, limits FROM plan_entitlements WHERE LOWER(plan_id) = $1', [normalizedPlanId]);
-    if (entRes.rows.length > 0) {
-      capabilities = entRes.rows[0].capabilities || capabilities;
-      limits = entRes.rows[0].limits || limits;
-    }
-  } catch (e) {
-    // Fallback
+  if (entRes.rows.length > 0) {
+    capabilities = entRes.rows[0].capabilities || capabilities;
+    limits = entRes.rows[0].limits || limits;
   }
 
   // 1. Ensure subscription row exists and is ACTIVE
@@ -206,7 +247,7 @@ export async function applyPaymentSuccess(client, {
     );
     await runner.query(
       `UPDATE subscriptions SET status = 'ACTIVE', plan_id = $1, current_period_end = now() + interval '${periodInterval}', updated_at = now() WHERE subscription_id = $2`,
-      [effectivePlanId, subId]
+      [canonicalPlanId, subId]
     );
   } else {
     // Expire any existing active subscription before insert
@@ -250,9 +291,9 @@ export async function applyPaymentSuccess(client, {
     `, [accountId, effectivePlanId, JSON.stringify(capabilities), JSON.stringify(limits)]);
   }
 
-  // 3. Persist invoice record in invoices table with normalized currency amount and statutory VAT
+  // 3. Persist invoice record in invoices table (canonical id = inv-${txIdStr}, reference = ${ref})
   const majorAmount = Number(amount);
-  const invId = `inv-${ref}`;
+  const invId = `inv-${txIdStr}`;
   const taxRate = 0.075;
   const subtotal = Math.round((majorAmount / (1 + taxRate)) * 100) / 100;
   const taxAmount = Math.round((majorAmount - subtotal) * 100) / 100;
@@ -264,15 +305,6 @@ export async function applyPaymentSuccess(client, {
       subtotal, tax_amount, tax_rate, plan_name, billing_interval, currency_symbol
     )
     VALUES ($1, $2, $3, $4, 'NGN', 'Paid', now(), $5, $6, $7, $8, $9, $10, '₦')
-    ON CONFLICT (id) DO UPDATE SET
-      status = 'Paid',
-      paid_at = now(),
-      subtotal = EXCLUDED.subtotal,
-      tax_amount = EXCLUDED.tax_amount,
-      tax_rate = EXCLUDED.tax_rate,
-      plan_name = EXCLUDED.plan_name,
-      billing_interval = EXCLUDED.billing_interval,
-      currency_symbol = EXCLUDED.currency_symbol
   `, [invId, accountId, ref, majorAmount, receiptUrl || null, subtotal, taxAmount, taxRate, planNameResolved, interval]);
 
   // Broadcast to connected ACP / UI instances

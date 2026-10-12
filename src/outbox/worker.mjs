@@ -131,7 +131,8 @@ export async function processOutboxEvent(event) {
           
           if (accId) {
             const planId = payload.data?.meta?.plan_id || payload.data?.metadata?.plan_id || payload.plan_id || 'PRO';
-            const ref = payload.data?.tx_ref || payload.data?.reference || `ref-${Date.now()}`;
+            const ref = String(payload.data?.tx_ref || payload.data?.reference || `ref-${Date.now()}`).trim();
+            const providerTxId = String(payload.data?.id || ref).trim();
             const billingInterval = (payload.data?.meta?.billing_interval || payload.data?.metadata?.billing_interval || 'monthly').toLowerCase();
             
             let majorAmount;
@@ -142,17 +143,44 @@ export async function processOutboxEvent(event) {
               majorAmount = (typeof rawAmount === 'number' && rawAmount >= 100) ? (rawAmount / 100) : rawAmount;
             }
 
+            const planRes = await client.query('SELECT * FROM subscription_plans WHERE LOWER(plan_id) = LOWER($1)', [planId]);
+            const plan = planRes.rows[0];
+            if (plan) {
+              const expectedPrice = billingInterval === 'annual' ? Number(plan.annual_price) : Number(plan.monthly_price);
+              if (majorAmount < expectedPrice) {
+                outboxLogger.warn({
+                  event: 'payment_webhook_amount_insufficient',
+                  accountId: accId,
+                  planId,
+                  billingInterval,
+                  majorAmount,
+                  expectedPrice,
+                  reference: ref
+                }, `Rejected webhook payment with insufficient amount (${majorAmount} < ${expectedPrice})`);
+                return true;
+              }
+            }
+
             const providerSubId = payload.data?.subscription_code || payload.data?.flw_ref || `sub-${ref}`;
             const { applyPaymentSuccess } = await import('../domain/billing/service.mjs');
-            await applyPaymentSuccess(client, {
-              accountId: accId,
-              planId,
-              billingInterval,
-              amount: majorAmount,
-              reference: ref,
-              receiptUrl: payload.data?.receipt_url || null,
-              providerSubId
-            });
+            try {
+              await applyPaymentSuccess(client, {
+                accountId: accId,
+                planId,
+                billingInterval,
+                amount: majorAmount,
+                reference: ref,
+                providerTxId,
+                receiptUrl: payload.data?.receipt_url || null,
+                providerSubId
+              });
+            } catch (payErr) {
+              if (payErr && payErr.code === 'PAYMENT_ALREADY_REDEEMED') {
+                outboxLogger.info({ event: 'payment_webhook_already_redeemed', reference: ref, providerTxId }, 'Payment already redeemed via verify endpoint; skipping duplicate credit');
+                return true;
+              }
+              throw payErr;
+            }
           }
         } else if (
           event.event_type === 'charge.failed' || 
@@ -161,7 +189,8 @@ export async function processOutboxEvent(event) {
           event.event_type.includes('fail') ||
           event.event_type.includes('declined')
         ) {
-          const accId = payload.data?.meta?.account_id || payload.data?.metadata?.account_id || payload.account_id;
+          const explicitAccountId = payload.data?.meta?.account_id || payload.data?.metadata?.account_id || null;
+          const accId = explicitAccountId || payload.account_id;
           const reason = payload.data?.gateway_response || payload.data?.processor_response || payload.reason || 'Payment declined by bank';
           outboxLogger.warn({
             event: 'payment_charge_failed_processing',
@@ -172,11 +201,18 @@ export async function processOutboxEvent(event) {
           }, `Processing failed/declined payment for account ${accId}: ${reason}`);
           
           if (accId) {
-            // Mark subscription as PAST_DUE on failed charge
-            await client.query(
-              "UPDATE subscriptions SET status = 'PAST_DUE' WHERE account_id = $1 AND status = 'ACTIVE'",
-              [accId]
-            );
+            const subCode = payload.data?.subscription_code || payload.data?.flw_ref || null;
+            if (explicitAccountId) {
+              await client.query(
+                "UPDATE subscriptions SET status = 'PAST_DUE' WHERE account_id = $1 AND status = 'ACTIVE'",
+                [explicitAccountId]
+              );
+            } else if (subCode) {
+              await client.query(
+                "UPDATE subscriptions SET status = 'PAST_DUE' WHERE account_id = $1 AND provider_subscription_id = $2 AND status = 'ACTIVE'",
+                [accId, subCode]
+              );
+            }
 
             // Audit log the failed payment attempt
             const { logEvent } = await import('../domain/audit/service.mjs');
