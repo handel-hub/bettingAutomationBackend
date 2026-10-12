@@ -103,55 +103,55 @@ export async function envelopeValidator(req, res, next) {
       throw err;
     }
     
+    // Require mandatory valid UUID sessionId on all protocol envelope routes (/sessions, /authorization, /reconciliation)
+    const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!envelope.sessionId || !UUID_REGEX.test(String(envelope.sessionId))) {
+      const err = new Error('SESSION_REVOKED');
+      // @ts-ignore
+      err.status = 401;
+      // @ts-ignore
+      err.code = 'BE_AUTH_SESSION_EXPIRED';
+      // @ts-ignore
+      err.legacyCode = 'SESSION_REVOKED';
+      throw err;
+    }
+
     // Look up accountId from session and verify expiry + active account status
-    if (envelope.sessionId) {
-      const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (!UUID_REGEX.test(String(envelope.sessionId))) {
-        const err = new Error('SESSION_REVOKED');
+    const sessRes = await pool.query(
+      `SELECT s.account_id, a.status AS account_status
+       FROM sessions s
+       JOIN accounts a ON s.account_id = a.account_id
+       WHERE s.session_id = $1
+         AND s.machine_id = $2
+         AND s.status = 'AUTHENTICATED'
+         AND (s.expires_at IS NULL OR s.expires_at > now())`,
+      [envelope.sessionId, matchedMachine.machine_id]
+    );
+    if (sessRes.rows.length > 0) {
+      if (sessRes.rows[0].account_status !== 'ACTIVE') {
+        const err = new Error('ACCOUNT_LOCKED');
         // @ts-ignore
-        err.status = 401;
+        err.status = 403;
         // @ts-ignore
-        err.code = 'BE_AUTH_SESSION_EXPIRED';
+        err.code = 'BE_AUTH_ACCOUNT_LOCKED';
         // @ts-ignore
-        err.legacyCode = 'SESSION_REVOKED';
+        err.legacyCode = 'ACCOUNT_LOCKED';
         throw err;
       }
-      const sessRes = await pool.query(
-        `SELECT s.account_id, a.status AS account_status
-         FROM sessions s
-         JOIN accounts a ON s.account_id = a.account_id
-         WHERE s.session_id = $1
-           AND s.machine_id = $2
-           AND s.status = 'AUTHENTICATED'
-           AND (s.expires_at IS NULL OR s.expires_at > now())`,
-        [envelope.sessionId, matchedMachine.machine_id]
-      );
-      if (sessRes.rows.length > 0) {
-        if (sessRes.rows[0].account_status !== 'ACTIVE') {
-          const err = new Error('ACCOUNT_LOCKED');
-          // @ts-ignore
-          err.status = 403;
-          // @ts-ignore
-          err.code = 'BE_AUTH_ACCOUNT_LOCKED';
-          // @ts-ignore
-          err.legacyCode = 'ACCOUNT_LOCKED';
-          throw err;
-        }
-        req.accountId = sessRes.rows[0].account_id;
-      } else {
-        const err = new Error('SESSION_REVOKED');
-        // @ts-ignore
-        err.status = 401;
-        // @ts-ignore
-        err.code = 'BE_AUTH_SESSION_EXPIRED';
-        // @ts-ignore
-        err.legacyCode = 'SESSION_REVOKED';
-        throw err;
-      }
+      req.accountId = sessRes.rows[0].account_id;
+    } else {
+      const err = new Error('SESSION_REVOKED');
+      // @ts-ignore
+      err.status = 401;
+      // @ts-ignore
+      err.code = 'BE_AUTH_SESSION_EXPIRED';
+      // @ts-ignore
+      err.legacyCode = 'SESSION_REVOKED';
+      throw err;
     }
 
     // Monotonic generation validation (INV-06: require clientGeneration on authenticated session envelopes)
-    if (envelope.sessionId && req.accountId) {
+    if (req.accountId) {
       if (typeof envelope.clientGeneration !== 'number' || !Number.isInteger(envelope.clientGeneration)) {
         const genErr = new Error('MISSING_CLIENT_GENERATION');
         // @ts-ignore

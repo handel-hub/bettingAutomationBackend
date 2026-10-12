@@ -16,14 +16,24 @@ export async function renew(sessionId, machineId, presentedGenerationState, clie
     // 1. Lock machine_session_states
     const stateRes = await client.query('SELECT * FROM machine_session_states WHERE account_id = (SELECT account_id FROM sessions WHERE session_id = $1) AND machine_id = $2 FOR UPDATE', [sessionId, machineId]);
     if (stateRes.rows.length === 0) {
-      throw new Error('Session state not found');
+      const err = new Error('Session state not found');
+      // @ts-ignore
+      err.status = 401;
+      // @ts-ignore
+      err.code = 'SESSION_REVOKED';
+      throw err;
     }
     const state = stateRes.rows[0];
     
     // 2. Lock session
     const session = await getSessionForUpdate(client, sessionId);
     if (!session || session.machine_id !== machineId) {
-      throw new Error('AUTH_FAILED');
+      const err = new Error('AUTH_FAILED');
+      // @ts-ignore
+      err.status = 401;
+      // @ts-ignore
+      err.code = 'SESSION_REVOKED';
+      throw err;
     }
     
     if (session.status !== 'AUTHENTICATED' || (session.expires_at && new Date(session.expires_at) <= new Date())) {

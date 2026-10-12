@@ -189,7 +189,11 @@ export function initializePaymentAdapter(providerOrSecretKey, options = {}) {
           tx_ref: String(transactionIdOrRef),
           status: 'successful',
           amount: 100000,
-          currency: 'NGN'
+          currency: 'NGN',
+          meta: {
+            plan_id: 'pro',
+            billing_interval: 'monthly'
+          }
         }
       };
     }

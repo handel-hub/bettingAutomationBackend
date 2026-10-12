@@ -233,12 +233,23 @@ export async function applyPaymentSuccess(client, {
   }
   const canonicalPlanId = planCheckRes.rows[0]?.plan_id || entRes.rows[0]?.plan_id || effectivePlanId;
 
-  // Fetch entitlements for capabilities & limits from authoritative plan_entitlements
+  // Fetch entitlements for capabilities & limits from authoritative plan_entitlements + subscription_plans.entitlements
   let capabilities = ['CAP_AUTOMATION_START', 'CAP_AUTOMATION_STOP', 'CAP_FILE_UPLOAD', 'CAP_TACTICAL_BET', 'CAP_CASH_OUT'];
   let limits = { max_machines: 5, max_concurrent_browsers: 5, risk_tier: 'LOW' };
+  const subPlanEntitlements = (planCheckRes.rows[0]?.entitlements && typeof planCheckRes.rows[0].entitlements === 'object')
+    ? planCheckRes.rows[0].entitlements
+    : {};
   if (entRes.rows.length > 0) {
     capabilities = entRes.rows[0].capabilities || capabilities;
-    limits = entRes.rows[0].limits || limits;
+    limits = {
+      ...subPlanEntitlements,
+      ...(entRes.rows[0].limits || limits)
+    };
+  } else {
+    limits = {
+      ...subPlanEntitlements,
+      ...limits
+    };
   }
 
   // Verify latest license has not been administratively REVOKED (CRITICAL-03 / REM-04)

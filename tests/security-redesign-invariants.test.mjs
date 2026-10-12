@@ -715,6 +715,114 @@ test('System-Wide Security Redesign Invariant Suite (SEC-INV-01 through SEC-INV-
     });
     assert.strictEqual(malformedTokenRes.status, 401, 'T-REG-05: Malformed non-UUID Bearer token must return 401, not 500');
   });
+
+  await t.test('T-RT-F01..T-RT-F03: Runtime Security Assessment Regression Suite (PAY-04, ENT-02, AUTH-02)', async () => {
+    const baseUrl = getServerBaseUrl();
+    const pool = getPool();
+
+    // 1. T-RT-F01 (PAY-04): Cross-tenant checkout reference claiming & customer email mismatch rejected with 403
+    const initRes = await fetch(`${baseUrl}/api/v1/billing/checkout`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sharedSessionId}`,
+        'Idempotency-Key': `idem-rt-f01-${crypto.randomUUID()}`
+      },
+      body: JSON.stringify({ planId: 'pro', billingInterval: 'monthly' })
+    });
+    assert.strictEqual(initRes.status, 200, 'T-RT-F01: Victim checkout initiation must succeed');
+    const initBody = await initRes.json();
+
+    // Provision a disposable second operator to attempt cross-account redemption
+    const { hashPassword } = await import('../src/crypto/hashing.mjs');
+    const attackerEmail = `rt-f01-attacker-${crypto.randomUUID()}@example.com`;
+    const pwHash = await hashPassword('Password123!');
+    const attAcc = await pool.query(
+      `INSERT INTO accounts (email, credentials_hash, status) VALUES ($1, $2, 'ACTIVE') RETURNING account_id`,
+      [attackerEmail, pwHash]
+    );
+    const attackerAccId = attAcc.rows[0].account_id;
+    let attMachineId = null;
+    try {
+      const attMachRes = await pool.query(
+        `INSERT INTO machines (account_id, installation_id, public_key_hex, descriptor, status)
+         VALUES ($1, $2, $3, '{"hostname":"rt-f01-att"}'::jsonb, 'REGISTERED')
+         RETURNING machine_id`,
+        [attackerAccId, `inst-rt-f01-${crypto.randomUUID()}`, crypto.randomBytes(32).toString('hex')]
+      );
+      attMachineId = attMachRes.rows[0].machine_id;
+      const attSessRes = await pool.query(
+        `INSERT INTO sessions (account_id, machine_id, status, renew_after, expires_at)
+         VALUES ($1, $2, 'AUTHENTICATED', now() + interval '30 minutes', now() + interval '1 hour')
+         RETURNING session_id`,
+        [attackerAccId, attMachineId]
+      );
+      const attSessionId = attSessRes.rows[0].session_id;
+      const hijackRes = await fetch(`${baseUrl}/api/v1/billing/checkout/verify`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${attSessionId}`
+        },
+        body: JSON.stringify({ reference: initBody.reference, planId: 'pro', billingInterval: 'monthly' })
+      });
+      assert.strictEqual(hijackRes.status, 403, 'T-RT-F01: Cross-account checkout reference redemption must return 403');
+    } finally {
+      await pool.query('DELETE FROM sessions WHERE account_id = $1', [attackerAccId]);
+      await pool.query('DELETE FROM machines WHERE account_id = $1', [attackerAccId]);
+      await pool.query('DELETE FROM security_events WHERE account_id = $1', [attackerAccId]);
+      await pool.query('DELETE FROM accounts WHERE account_id = $1', [attackerAccId]);
+    }
+
+    // 2. T-RT-F02 (ENT-02): Substring inclusion platform bypass ("Bet9ja (sportybet)") rejected with 403
+    await pool.query(
+      `UPDATE licenses
+       SET limits = jsonb_set(COALESCE(limits, '{}'::jsonb), '{allowedPlatformIds}', '["sportybet"]'::jsonb)
+       WHERE account_id = $1 AND status = 'VALID'`,
+      [TESTER_ACCOUNT_ID]
+    );
+    try {
+      await assert.rejects(
+        async () => {
+          await createBettingAccount(TESTER_ACCOUNT_ID, {
+            name: 'Substring Bypass Attempt',
+            platformDisplayName: 'Bet9ja (sportybet)',
+            accountUsername: `sub_${crypto.randomUUID().slice(0, 8)}`,
+            accountPassword: 'pw'
+          });
+        },
+        (err) => err.code === 'BE_PERM_ENTITLEMENT_EXCEEDED' && err.status === 403
+      );
+    } finally {
+      await pool.query(
+        `UPDATE licenses
+         SET limits = limits - 'allowedPlatformIds'
+         WHERE account_id = $1 AND status = 'VALID'`,
+        [TESTER_ACCOUNT_ID]
+      );
+    }
+
+    // 3. T-RT-F03 (AUTH-02): Sessionless envelope (sessionId: null) rejected with 401 on /sessions/logout and /sessions/renew
+    for (const route of ['/api/v1/sessions/logout', '/api/v1/sessions/renew']) {
+      const env = {
+        version: 2,
+        sessionId: null,
+        machineId: sharedMachineId,
+        nonce: `nonce-rt-f03-${crypto.randomUUID()}`,
+        timestamp: new Date().toISOString(),
+        clientGeneration: sharedSessionGen,
+        clientServerEpoch: 1,
+        payload: { action: 'TEST_SESSIONLESS' }
+      };
+      const sig = sign(sharedClientKeyPair.privateKey, Buffer.from('CONTROL_PLANE_V1' + canonicalStringify(env), 'utf8'));
+      const r = await fetch(`${baseUrl}${route}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...env, signature: sig })
+      });
+      assert.strictEqual(r.status, 401, `T-RT-F03: Sessionless envelope on ${route} must return 401`);
+    }
+  });
 });
 
 after(async () => {

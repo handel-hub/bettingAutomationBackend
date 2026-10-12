@@ -8,7 +8,7 @@ import {
   applyPaymentSuccess
 } from '../../domain/billing/service.mjs';
 import { getSubscriptionPlansCatalog } from '../../domain/plans/service.mjs';
-import { initiateCheckout } from '../../domain/payment/service.mjs';
+import { initiateCheckout, recordCheckoutBinding, getCheckoutBinding } from '../../domain/payment/service.mjs';
 import { getProvider } from '../../domain/payment/provider.mjs';
 import { getPool } from '../../persistence/connection.mjs';
 import { signLicensePayload } from '../../domain/licensing/service.mjs';
@@ -88,7 +88,14 @@ async function handleCheckout(req, res, next) {
 
     const txRefMatch = checkoutUrl.match(/[?&]tx_ref=([^&#]+)/);
     const payMatch = checkoutUrl.match(/\/pay\/([^?&#]+)/);
-    const reference = txRefMatch ? decodeURIComponent(txRefMatch[1]) : (payMatch ? payMatch[1] : `flw_${Date.now()}`);
+    const reference = txRefMatch ? decodeURIComponent(txRefMatch[1]) : (payMatch ? payMatch[1] : `flw_${accountId}_${Date.now()}`);
+
+    recordCheckoutBinding(reference, {
+      accountId,
+      planId: resolvedPlanId,
+      billingInterval: interval,
+      expectedAmount: amount
+    });
 
     res.json({
       checkoutUrl,
@@ -153,14 +160,66 @@ async function handleVerify(req, res, next) {
     let paymentResult = null;
     if (isSuccess && accountId) {
       const txMeta = tx.data?.meta || tx.data?.metadata || {};
-      
-      // Tenant isolation guard: if account_id is embedded in payment metadata, verify it matches
+      const providerRef = String(tx.data?.tx_ref || tx.data?.reference || reference).trim();
+      const providerTxId = String(tx.data?.id || reference).trim();
+      const boundCheckout = getCheckoutBinding(String(reference).trim()) || getCheckoutBinding(providerRef);
+
+      // 1. Authoritative checkout initiation binding check
+      if (boundCheckout && boundCheckout.accountId && boundCheckout.accountId !== accountId) {
+        return res.status(403).json({
+          verified: false,
+          code: 'CROSS_TENANT_REFERENCE_DENIED',
+          error: 'Transaction reference was initiated by a different account'
+        });
+      }
+
+      // 2. Tenant isolation guard: if account_id is embedded in payment metadata, verify it matches
       if (txMeta.account_id && txMeta.account_id !== accountId) {
         return res.status(403).json({ error: 'Transaction belongs to a different account' });
       }
 
-      const planId = (txMeta.plan_id || req.body.planId || 'pro').toLowerCase();
-      const billingInterval = (txMeta.billing_interval || req.body.billingInterval || 'monthly').toLowerCase();
+      // 3. Embedded UUID guard in reference / providerRef (e.g. flw_<uuid>_ or account=<uuid>)
+      const embeddedFlwMatch = providerRef.match(/^flw_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_/i) ||
+        String(reference).match(/^flw_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_/i);
+      const embeddedQueryMatch = providerRef.match(/[?&]account=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i) ||
+        String(reference).match(/[?&]account=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+      const embeddedAccId = embeddedFlwMatch?.[1] || embeddedQueryMatch?.[1] || null;
+      if (embeddedAccId && embeddedAccId.toLowerCase() !== String(accountId).toLowerCase()) {
+        return res.status(403).json({
+          verified: false,
+          code: 'CROSS_TENANT_REFERENCE_DENIED',
+          error: 'Transaction reference is bound to a different account'
+        });
+      }
+
+      const pool = getPool();
+
+      // 4. Verify tx.data?.customer?.email against the authenticated account's email
+      const txCustomerEmail = tx.data?.customer?.email ? String(tx.data.customer.email).trim().toLowerCase() : null;
+      if (txCustomerEmail) {
+        const accRes = await pool.query('SELECT email FROM accounts WHERE account_id = $1', [accountId]);
+        const callerEmail = accRes.rows[0]?.email ? String(accRes.rows[0].email).trim().toLowerCase() : null;
+        if (callerEmail && txCustomerEmail !== callerEmail) {
+          return res.status(403).json({
+            verified: false,
+            code: 'CUSTOMER_EMAIL_MISMATCH',
+            error: 'Transaction customer email does not match authenticated account'
+          });
+        }
+      }
+
+      // 5. Prevent plan upgrade spoofing against initiated checkout binding
+      if (boundCheckout?.planId && !txMeta.plan_id && req.body.planId && String(req.body.planId).toLowerCase() !== boundCheckout.planId) {
+        return res.status(400).json({
+          verified: false,
+          code: 'PLAN_METADATA_MISMATCH',
+          error: `Requested plan (${req.body.planId}) does not match initiated checkout plan (${boundCheckout.planId})`
+        });
+      }
+
+      const planId = (txMeta.plan_id || boundCheckout?.planId || req.body.planId || 'pro').toLowerCase();
+      const billingInterval = (txMeta.billing_interval || boundCheckout?.billingInterval || req.body.billingInterval || 'monthly').toLowerCase();
+      const hasVerifiedPlanMeta = Boolean(txMeta.plan_id || boundCheckout?.planId);
 
       // Verify transaction currency is NGN
       const currency = String(tx.data?.currency || 'NGN').trim().toUpperCase();
@@ -191,10 +250,7 @@ async function handleVerify(req, res, next) {
       const rawAmount = Number(rawAmountVal);
       const amount = isPaystack ? (rawAmount / 100) : rawAmount;
       const receiptUrl = tx.data?.receipt_url || null;
-      const providerRef = String(tx.data?.tx_ref || tx.data?.reference || reference).trim();
-      const providerTxId = String(tx.data?.id || reference).trim();
 
-      const pool = getPool();
       const planRes = await pool.query('SELECT * FROM subscription_plans WHERE LOWER(plan_id) = $1 AND is_active = true', [planId]);
       const plan = planRes.rows[0];
 
@@ -213,8 +269,8 @@ async function handleVerify(req, res, next) {
           error: `Payment amount (${amount}) is insufficient for requested plan (${planId}: ${expectedPrice})`
         });
       }
-      // Prevent cross-tier plan spoofing (e.g. using a Pro Annual payment to claim Elite Monthly when provider metadata omits plan_id)
-      if (!txMeta.plan_id && planId !== 'pro' && amount !== expectedPrice) {
+      // Prevent cross-tier plan spoofing (e.g. using a Starter Annual payment to claim Pro Monthly when provider metadata omits plan_id)
+      if (!hasVerifiedPlanMeta && amount !== expectedPrice) {
         return res.status(400).json({
           verified: false,
           code: 'PLAN_METADATA_MISMATCH',

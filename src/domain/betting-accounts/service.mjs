@@ -148,9 +148,11 @@ export async function createBettingAccount(accountId, data) {
       !allowedPlatforms.includes('ALL')
     ) {
       const normalizedPlatform = String(platformDisplayName).trim().toLowerCase();
+      const canonPlatform = normalizedPlatform.replace(/[^a-z0-9]/g, '');
       const isAllowed = allowedPlatforms.some((p) => {
         const normAllowed = String(p).trim().toLowerCase();
-        return normAllowed === normalizedPlatform || normalizedPlatform.includes(normAllowed);
+        const canonAllowed = normAllowed.replace(/[^a-z0-9]/g, '');
+        return normAllowed === normalizedPlatform || (canonPlatform.length > 0 && canonPlatform === canonAllowed);
       });
       if (!isAllowed) {
         const err = new Error(`Platform "${platformDisplayName}" is not permitted by your current license tier`);
@@ -162,7 +164,7 @@ export async function createBettingAccount(accountId, data) {
       }
     }
 
-    const maxAccounts = limits.maxAccounts ?? limits.max_accounts;
+    const maxAccounts = limits.maxBettingAccounts ?? limits.maxAccounts ?? limits.max_accounts;
     if (typeof maxAccounts === 'number' && maxAccounts > 0) {
       const currentCount = await countAccountsByAccount(client, accountId);
       if (currentCount >= maxAccounts) {
@@ -267,7 +269,12 @@ export async function getBettingAccount(accountId, id) {
   const acc = await findAccountById(undefined, accountId, id);
 
   if (!acc) {
-    throw new Error('Betting account not found');
+    const err = new Error('Betting account not found');
+    // @ts-ignore
+    err.status = 404;
+    // @ts-ignore
+    err.code = 'NOT_FOUND';
+    throw err;
   }
   return {
     id: acc.id,
@@ -324,7 +331,14 @@ export async function executeAccountAction(accountId, id, actionType) {
 
   if (actionType === 'DELETE_ACCOUNT' || actionType === 'DELETE') {
     const res = await deleteAccount(undefined, accountId, id);
-    if (!res) throw new Error('Account not found');
+    if (!res) {
+      const err = new Error('Account not found');
+      // @ts-ignore
+      err.status = 404;
+      // @ts-ignore
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
     return { success: true, accountId: id, action: 'DELETED', backendState: 'DELETED', presentationCategory: 'Neutral', statusDescription: 'Account deleted' };
   }
 
@@ -355,7 +369,14 @@ export async function executeAccountAction(accountId, id, actionType) {
   }
 
   const res = await updateAccountState(undefined, accountId, id, { newState, category, description });
-  if (!res) throw new Error('Account not found');
+  if (!res) {
+    const err = new Error('Account not found');
+    // @ts-ignore
+    err.status = 404;
+    // @ts-ignore
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
 
   return {
     success: true,
@@ -425,7 +446,14 @@ export async function executeBulkAction(accountId, accountActionType, accountIds
  */
 export async function getDecryptedPassword(accountId, id) {
   const creds = await getCredentialsForDecryption(undefined, accountId, id);
-  if (!creds) throw new Error('Account not found');
+  if (!creds) {
+    const err = new Error('Account not found');
+    // @ts-ignore
+    err.status = 404;
+    // @ts-ignore
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
   const { platform_display_name, account_username, account_password_encrypted, password_iv, password_tag } = creds;
 
   const aad = Buffer.from(`${accountId}:${platform_display_name}:${account_username}`);
@@ -439,7 +467,14 @@ export async function updateBettingAccount(accountId, id, updates) {
   let ciphertext, nonce, tag;
   if (updates.accountPassword) {
     const existing = await findAccountById(undefined, accountId, id);
-    if (!existing) throw new Error('Betting account not found');
+    if (!existing) {
+      const err = new Error('Betting account not found');
+      // @ts-ignore
+      err.status = 404;
+      // @ts-ignore
+      err.code = 'NOT_FOUND';
+      throw err;
+    }
     const aad = Buffer.from(`${accountId}:${existing.platform_display_name}:${existing.account_username}`);
     const encrypted = encrypt(getMasterVaultKey(), Buffer.from(updates.accountPassword, 'utf8'), aad);
     ciphertext = encrypted.ciphertext;
@@ -455,7 +490,14 @@ export async function updateBettingAccount(accountId, id, updates) {
     tags: updates.tags
   });
 
-  if (!updated) throw new Error('Betting account not found');
+  if (!updated) {
+    const err = new Error('Betting account not found');
+    // @ts-ignore
+    err.status = 404;
+    // @ts-ignore
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
 
   return {
     id: updated.id,
