@@ -234,13 +234,14 @@ export async function applyPaymentSuccess(client, {
   const canonicalPlanId = planCheckRes.rows[0]?.plan_id || entRes.rows[0]?.plan_id || effectivePlanId;
 
   // Fetch entitlements for capabilities & limits from authoritative plan_entitlements + subscription_plans.entitlements
-  let capabilities = ['CAP_AUTOMATION_START', 'CAP_AUTOMATION_STOP', 'CAP_FILE_UPLOAD', 'CAP_TACTICAL_BET', 'CAP_CASH_OUT'];
+  let capabilities = ['CAP_AUTOMATION_START', 'CAP_AUTOMATION_STOP', 'CAP_FILE_UPLOAD', 'CAP_TACTICAL_BET', 'CAP_CASH_OUT', 'CAP_CONFIG_MODIFY'];
   let limits = { max_machines: 5, max_concurrent_browsers: 5, risk_tier: 'LOW' };
   const subPlanEntitlements = (planCheckRes.rows[0]?.entitlements && typeof planCheckRes.rows[0].entitlements === 'object')
     ? planCheckRes.rows[0].entitlements
     : {};
   if (entRes.rows.length > 0) {
-    capabilities = entRes.rows[0].capabilities || capabilities;
+    const rawCaps = Array.isArray(entRes.rows[0].capabilities) ? entRes.rows[0].capabilities : capabilities;
+    capabilities = Array.from(new Set([...rawCaps, 'CAP_AUTOMATION_START', 'CAP_AUTOMATION_STOP']));
     limits = {
       ...subPlanEntitlements,
       ...(entRes.rows[0].limits || limits)
@@ -363,7 +364,8 @@ export async function applyPaymentSuccess(client, {
       accountId,
       subscription: {
         planId: normalizedPlanId,
-        status: 'ACTIVE'
+        status: 'ACTIVE',
+        capabilities
       },
       timestamp: new Date().toISOString()
     }, accountId);
@@ -372,9 +374,15 @@ export async function applyPaymentSuccess(client, {
       licenseKey,
       accountId,
       license: {
+        licenseId: licenseKey,
         planId: normalizedPlanId,
-        status: 'VALID'
+        status: 'VALID',
+        capabilities,
+        limits,
+        expiresAt: licenseExpiresAt
       },
+      capabilities,
+      limits,
       timestamp: new Date().toISOString()
     }, accountId);
   } catch (wsErr) {

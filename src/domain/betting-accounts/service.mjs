@@ -27,6 +27,26 @@ function getMasterVaultKey() {
 }
 
 /**
+ * Safely decrypts a stored betting account row's password for authoritative Control Plane hydration.
+ * Returns empty string if decryption fails or columns are absent.
+ * @param {string} accountId
+ * @param {any} row
+ * @returns {string}
+ */
+export function tryDecryptAccountPassword(accountId, row) {
+  try {
+    if (!row || !row.account_password_encrypted || !row.password_iv || !row.password_tag) {
+      return '';
+    }
+    const aad = Buffer.from(`${accountId}:${row.platform_display_name}:${row.account_username}`);
+    const decryptedBuf = decrypt(getMasterVaultKey(), row.password_iv, row.account_password_encrypted, row.password_tag, aad);
+    return decryptedBuf.toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+/**
  * @typedef {Object} AccountActionContract
  * @property {string} id
  * @property {string} label

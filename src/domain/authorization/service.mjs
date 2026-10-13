@@ -8,7 +8,11 @@ import { withTransaction } from '../../persistence/transaction.mjs';
  */
 export function computeCapabilities(license) {
   if (!license) return [];
-  return Array.isArray(license.capabilities) ? license.capabilities : [];
+  const rawCaps = Array.isArray(license.capabilities) ? license.capabilities : [];
+  if (license.status === 'VALID') {
+    return Array.from(new Set([...rawCaps, 'CAP_AUTOMATION_START', 'CAP_AUTOMATION_STOP']));
+  }
+  return rawCaps;
 }
 
 

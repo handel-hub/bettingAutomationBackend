@@ -1,6 +1,7 @@
 // @ts-check
 import { getPool } from '../../persistence/connection.mjs';
 import { assertActiveLicense } from '../licensing/service.mjs';
+import { tryDecryptAccountPassword } from '../betting-accounts/service.mjs';
 import crypto from 'crypto';
 
 /**
@@ -31,9 +32,10 @@ export async function getAutomationSnapshot(accountId) {
   const licenseCaps = Array.isArray(license?.capabilities) ? license.capabilities : [];
   const maxBrowsers = license?.limits?.max_concurrent_browsers || 2;
 
-  // 3. Fetch Accounts with Automation Settings
+  // 3. Fetch Accounts with Automation Settings & Encrypted Credentials for ACP Hydration
   const accountsRes = await pool.query(`
     SELECT ba.id, ba.name, ba.platform_display_name, ba.account_username,
+           ba.account_password_encrypted, ba.password_iv, ba.password_tag,
            ba.backend_state, aac.bet_cycle_enabled, aac.browser_status, aac.account_status,
            aac.pricing_source, aac.risk_source, aac.rebet_source,
            aac.custom_pricing, aac.custom_risk, aac.custom_rebet
@@ -43,20 +45,24 @@ export async function getAutomationSnapshot(accountId) {
     ORDER BY ba.created_at ASC
   `, [accountId]);
 
-  const accounts = accountsRes.rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    platformDisplayName: r.platform_display_name,
-    accountUsername: r.account_username,
-    backendState: r.backend_state,
-    betCycleEnabled: r.bet_cycle_enabled ?? true,
-    pricingSource: r.pricing_source || 'GLOBAL',
-    riskSource: r.risk_source || 'GLOBAL',
-    rebetSource: r.rebet_source || 'GLOBAL',
-    customPricing: r.custom_pricing,
-    customRisk: r.custom_risk,
-    customRebet: r.custom_rebet
-  }));
+  const accounts = accountsRes.rows.map((r) => {
+    const decryptedPassword = tryDecryptAccountPassword(accountId, r);
+    return {
+      id: r.id,
+      name: r.name,
+      platformDisplayName: r.platform_display_name,
+      accountUsername: r.account_username,
+      ...(decryptedPassword ? { accountPassword: decryptedPassword } : {}),
+      backendState: r.backend_state,
+      betCycleEnabled: r.bet_cycle_enabled ?? true,
+      pricingSource: r.pricing_source || 'GLOBAL',
+      riskSource: r.risk_source || 'GLOBAL',
+      rebetSource: r.rebet_source || 'GLOBAL',
+      customPricing: r.custom_pricing,
+      customRisk: r.custom_risk,
+      customRebet: r.custom_rebet
+    };
+  });
 
   return {
     globalConfig: {

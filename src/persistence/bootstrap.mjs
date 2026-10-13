@@ -106,11 +106,17 @@ export async function bootstrapDevAccounts(options = {}) {
     // 1. Ensure 'pro' and 'starter' plan entitlements exist
     await client.query(`
       INSERT INTO plan_entitlements (plan_id, capabilities, limits)
-      VALUES (
-        'pro',
-        $1::jsonb,
-        '{"max_machines": 5, "max_concurrent_browsers": 6, "risk_tier": "LOW", "price": 10000, "interval": "Monthly"}'::jsonb
-      )
+      VALUES
+        (
+          'pro',
+          $1::jsonb,
+          '{"max_machines": 5, "max_concurrent_browsers": 6, "risk_tier": "LOW", "price": 10000, "interval": "Monthly"}'::jsonb
+        ),
+        (
+          'starter',
+          $1::jsonb,
+          '{"max_machines": 2, "max_concurrent_browsers": 2, "risk_tier": "LOW", "price": 5000, "interval": "Monthly"}'::jsonb
+        )
       ON CONFLICT (plan_id) DO UPDATE SET capabilities = EXCLUDED.capabilities;
     `, [JSON.stringify(PRO_CAPABILITIES)]);
 
